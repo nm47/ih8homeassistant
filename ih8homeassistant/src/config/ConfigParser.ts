@@ -4,8 +4,12 @@ import {
     BridgeConfig,
     BrokerConfig,
     DeviceConfig,
+    OnOffDeviceConfig,
+    DimmableDeviceConfig,
+    ExtendedColorDeviceConfig,
     DEFAULT_BASE_OPTIONS,
     DEFAULT_COLOR_OPTIONS,
+    DEFAULT_MQTT_SETTINGS,
 } from "../types/config.js";
 import { isValidDeviceType } from "../types/devices.js";
 
@@ -94,7 +98,43 @@ export class ConfigParser {
             throw new ConfigValidationError("broker.pass must be a string");
         }
 
-        return { host, port, user, pass };
+        // Parse optional MQTT client settings with defaults
+        const maxReconnectAttempts = raw.maxReconnectAttempts !== undefined
+            ? this.parsePositiveInteger(raw.maxReconnectAttempts, "broker.maxReconnectAttempts")
+            : DEFAULT_MQTT_SETTINGS.maxReconnectAttempts;
+
+        const baseReconnectDelay = raw.baseReconnectDelay !== undefined
+            ? this.parsePositiveInteger(raw.baseReconnectDelay, "broker.baseReconnectDelay")
+            : DEFAULT_MQTT_SETTINGS.baseReconnectDelay;
+
+        const maxReconnectDelay = raw.maxReconnectDelay !== undefined
+            ? this.parsePositiveInteger(raw.maxReconnectDelay, "broker.maxReconnectDelay")
+            : DEFAULT_MQTT_SETTINGS.maxReconnectDelay;
+
+        const connectTimeout = raw.connectTimeout !== undefined
+            ? this.parsePositiveInteger(raw.connectTimeout, "broker.connectTimeout")
+            : DEFAULT_MQTT_SETTINGS.connectTimeout;
+
+        // Parse QoS level
+        let qos: 0 | 1 | 2 = DEFAULT_MQTT_SETTINGS.qos;
+        if (raw.qos !== undefined) {
+            if (typeof raw.qos !== "number" || ![0, 1, 2].includes(raw.qos)) {
+                throw new ConfigValidationError("broker.qos must be 0, 1, or 2");
+            }
+            qos = raw.qos as 0 | 1 | 2;
+        }
+
+        return {
+            host,
+            port,
+            user,
+            pass,
+            maxReconnectAttempts,
+            baseReconnectDelay,
+            maxReconnectDelay,
+            connectTimeout,
+            qos,
+        };
     }
 
     /**
@@ -136,17 +176,20 @@ export class ConfigParser {
             );
         }
 
-        const topics = this.parseTopics(raw.topics, type, index);
-        const options = this.parseOptions(raw.options, type, index);
-
         // TypeScript discriminated union handling
         if (type === "OnOffPlugInUnitDevice" || type === "OnOffLightDevice") {
-            return { type, name, topics, options };
+            const topics = this.parseTopics(raw.topics, type, index);
+            const options = this.parseOptions(raw.options, type, index);
+            return { type, name, topics, options } as OnOffDeviceConfig;
         } else if (type === "DimmableLightDevice") {
-            return { type, name, topics, options };
+            const topics = this.parseTopics(raw.topics, type, index);
+            const options = this.parseOptions(raw.options, type, index);
+            return { type, name, topics, options } as DimmableDeviceConfig;
         } else {
             // ExtendedColorLightDevice
-            return { type, name, topics, options };
+            const topics = this.parseTopics(raw.topics, type, index);
+            const options = this.parseOptions(raw.options, type, index);
+            return { type, name, topics, options } as ExtendedColorDeviceConfig;
         }
     }
 
@@ -231,12 +274,13 @@ export class ConfigParser {
 
     /**
      * Parse and validate device options, applying defaults
+     * Always returns a complete options object with all required fields
      */
     private static parseOptions(
         raw: unknown,
         type: string,
         deviceIndex: number
-    ): DeviceConfig["options"] {
+    ): Required<typeof DEFAULT_BASE_OPTIONS> | Required<typeof DEFAULT_COLOR_OPTIONS> {
         if (raw === undefined) {
             // Return defaults based on device type
             return type === "ExtendedColorLightDevice"
@@ -250,13 +294,13 @@ export class ConfigParser {
             );
         }
 
-        // Start with defaults
+        // Start with defaults (which are already Required types)
         const defaults =
             type === "ExtendedColorLightDevice"
                 ? DEFAULT_COLOR_OPTIONS
                 : DEFAULT_BASE_OPTIONS;
 
-        const options: Record<string, unknown> = { ...defaults };
+        const options = { ...defaults };
 
         // Override with provided values
         if (raw.onValue !== undefined) {
@@ -303,7 +347,7 @@ export class ConfigParser {
                         `devices[${deviceIndex}].options.hex must be a boolean`
                     );
                 }
-                options.hex = raw.hex;
+                (options as Required<typeof DEFAULT_COLOR_OPTIONS>).hex = raw.hex;
             }
 
             if (raw.hexPrefix !== undefined) {
@@ -312,7 +356,7 @@ export class ConfigParser {
                         `devices[${deviceIndex}].options.hexPrefix must be a string`
                     );
                 }
-                options.hexPrefix = raw.hexPrefix;
+                (options as Required<typeof DEFAULT_COLOR_OPTIONS>).hexPrefix = raw.hexPrefix;
             }
         }
 
@@ -324,5 +368,17 @@ export class ConfigParser {
      */
     private static isRecord(value: unknown): value is Record<string, unknown> {
         return typeof value === "object" && value !== null && !Array.isArray(value);
+    }
+
+    /**
+     * Parse and validate a positive integer value
+     */
+    private static parsePositiveInteger(value: unknown, fieldName: string): number {
+        if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+            throw new ConfigValidationError(
+                `${fieldName} must be a positive integer`
+            );
+        }
+        return value;
     }
 }

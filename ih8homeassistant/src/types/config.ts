@@ -10,6 +10,16 @@ export interface BrokerConfig {
     port: number;
     user?: string;
     pass?: string;
+    /** Maximum number of reconnection attempts (default: 10) */
+    maxReconnectAttempts?: number;
+    /** Base reconnection delay in milliseconds (default: 1000) */
+    baseReconnectDelay?: number;
+    /** Maximum reconnection delay in milliseconds (default: 60000) */
+    maxReconnectDelay?: number;
+    /** Connection timeout in milliseconds (default: 10000) */
+    connectTimeout?: number;
+    /** MQTT QoS level for publishing (0, 1, or 2; default: 0 for low latency) */
+    qos?: 0 | 1 | 2;
 }
 
 /**
@@ -75,7 +85,7 @@ export interface OnOffDeviceConfig {
     type: "OnOffPlugInUnitDevice" | "OnOffLightDevice";
     name: string;
     topics: BaseTopics;
-    options?: BaseOptions;
+    options: Required<BaseOptions>;
 }
 
 /**
@@ -85,7 +95,7 @@ export interface DimmableDeviceConfig {
     type: "DimmableLightDevice";
     name: string;
     topics: LevelTopics;
-    options?: BaseOptions;
+    options: Required<BaseOptions>;
 }
 
 /**
@@ -95,7 +105,7 @@ export interface ExtendedColorDeviceConfig {
     type: "ExtendedColorLightDevice";
     name: string;
     topics: ColorTopics;
-    options?: ColorOptions;
+    options: Required<ColorOptions>;
 }
 
 /**
@@ -130,4 +140,15 @@ export const DEFAULT_COLOR_OPTIONS: Required<ColorOptions> = {
     ...DEFAULT_BASE_OPTIONS,
     hex: false,
     hexPrefix: "#",
+};
+
+/**
+ * Default values for MQTT broker reconnection settings
+ */
+export const DEFAULT_MQTT_SETTINGS = {
+    maxReconnectAttempts: 10,
+    baseReconnectDelay: 1000, // 1 second
+    maxReconnectDelay: 60000, // 60 seconds
+    connectTimeout: 10000, // 10 seconds
+    qos: 0 as 0 | 1 | 2, // QoS 0 for lowest latency
 };

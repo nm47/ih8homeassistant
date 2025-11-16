@@ -1,0 +1,61 @@
+[broker]
+host = "192.168.50.74"
+port = 1883
+user = ""
+pass = ""
+qos  = 0
+
+[[devices]]
+type = "OnOffPlugInUnitDevice"
+name = "Den Light"
+
+[devices.topics]
+getOnline = "den_light/tele/LWT"
+getOn     = "den_light/stat/POWER"
+setOn     = "den_light/cmnd/POWER"
+
+[[devices]]
+type = "OnOffLightDevice"
+name = "Closet Light"
+
+[devices.topics]
+getOnline = "closet_light/tele/LWT"
+getOn     = "closet_light/stat/POWER"
+setOn     = "closet_light/cmnd/POWER"
+
+[[devices]]
+type = "ExtendedColorLightDevice"
+name = "Nudge"
+
+[devices.topics]
+getOnline = "nudge/status/online"
+getRGB    = "nudge/status/color"
+getBrightness = "nudge/status/brightness"
+getOn     = "nudge/status/power"
+setRGB    = "nudge/command/color"
+setBrightness = "nudge/command/brightness"
+setOn     = "nudge/command/power"
+
+[devices.options]
+onValue   = "ON"
+offValue  = "OFF"
+hex       = true
+hexPrefix = "#"
+
+[[devices]]
+type = "OnOffLightDevice"
+name = "Living Room Light"
+
+[devices.topics]
+getOnline = "living_room_light/tele/LWT"
+getOn     = "living_room_light/stat/POWER"
+setOn     = "living_room_light/cmnd/POWER"
+
+[[devices]]
+type = "OnOffLightDevice"
+name = "Reading Lamp"
+
+[devices.topics]
+getOnline = "reading_lamp/tele/LWT"
+getOn     = "reading_lamp/stat/POWER"
+setOn     = "reading_lamp/cmnd/POWER"

@@ -1,0 +1,290 @@
+#!/usr/bin/env node
+/**
+ * ih8homeassistant - MQTT to Matter Bridge
+ */
+
+/**
+ * Platform setup must be imported first
+ * This initializes the Matter.js platform and environment
+ */
+import "@matter/main/platform";
+
+import { Endpoint, Environment, ServerNode, StorageService, VendorId } from "@matter/main";
+import { BridgedDeviceBasicInformationServer } from "@matter/main/behaviors/bridged-device-basic-information";
+import { ColorControlServer } from "@matter/main/behaviors/color-control";
+import { OnOffPlugInUnitDevice } from "@matter/main/devices/on-off-plug-in-unit";
+import { OnOffLightDevice } from "@matter/main/devices/on-off-light";
+import { ExtendedColorLightDevice } from "@matter/main/devices/extended-color-light";
+import { AggregatorEndpoint } from "@matter/main/endpoints/aggregator";
+import { ConfigParser } from "./config/ConfigParser.js";
+import type { DeviceConfig } from "./types/config.js";
+import { MqttClient } from "./mqtt/MqttClient.js";
+import { DeviceFactory } from "./mqtt/devices/DeviceFactory.js";
+import type { BaseDevice } from "./mqtt/devices/BaseDevice.js";
+import { join } from "path";
+
+/**
+ * Create a sanitized endpoint ID from device name
+ */
+function createEndpointId(deviceName: string): string {
+    return deviceName.toLowerCase().replace(/\s+/g, "-");
+}
+
+/**
+ * Map configuration device type to Matter.js device class with BridgedDeviceBasicInformationServer
+ */
+function getDeviceType(deviceType: DeviceConfig["type"]) {
+    switch (deviceType) {
+        case "OnOffPlugInUnitDevice":
+            return OnOffPlugInUnitDevice.with(BridgedDeviceBasicInformationServer);
+        case "OnOffLightDevice":
+            return OnOffLightDevice.with(BridgedDeviceBasicInformationServer);
+        case "DimmableLightDevice":
+            // For now, treat dimmable as OnOffLight until we add level control
+            return OnOffLightDevice.with(BridgedDeviceBasicInformationServer);
+        case "ExtendedColorLightDevice":
+            // Enable HueSaturation feature for RGB color wheel support
+            return ExtendedColorLightDevice.with(
+                BridgedDeviceBasicInformationServer,
+                ColorControlServer.with("HueSaturation", "Xy", "ColorTemperature")
+            );
+        default:
+            throw new Error(`Unsupported device type: ${deviceType}`);
+    }
+}
+
+/**
+ * Main bootstrap function that sets up the Matter bridge
+ */
+async function bootstrap(): Promise<void> {
+    console.log("=== ih8homeassistant - MQTT to Matter Bridge ===\n");
+
+    try {
+        // Load configuration
+        const configPath = join(process.cwd(), "config.toml");
+        console.log(`Loading configuration from: ${configPath}`);
+        const config = ConfigParser.loadFromFile(configPath);
+        console.log(`Loaded ${config.devices.length} device(s) from configuration\n`);
+
+        // Set up Matter environment and storage
+        const environment = Environment.default;
+        const storageService = environment.get(StorageService);
+        console.log(`Storage location: ${storageService.location}`);
+        console.log('Use --storage-path=NAME to specify different storage location');
+        console.log('Use --storage-clear to start with empty storage\n');
+
+        // Create storage context for our bridge configuration
+        const deviceStorage = (await storageService.open("ih8homeassistant")).createContext("bridge");
+
+        // Get or create stable configuration values
+        const passcode = environment.vars.number("passcode") ?? (await deviceStorage.get("passcode", 20202021));
+        const discriminator = environment.vars.number("discriminator") ?? (await deviceStorage.get("discriminator", 3840));
+        const vendorId = environment.vars.number("vendorid") ?? (await deviceStorage.get("vendorid", 0xfff1));
+        const productId = environment.vars.number("productid") ?? (await deviceStorage.get("productid", 0x8000));
+        const port = environment.vars.number("port") ?? 5540;
+        const uniqueId = environment.vars.string("uniqueid") ?? (await deviceStorage.get("uniqueid", `ih8ha-${Date.now()}`));
+
+        // Persist configuration
+        await deviceStorage.set({
+            passcode,
+            discriminator,
+            vendorid: vendorId,
+            productid: productId,
+            uniqueid: uniqueId,
+        });
+
+        console.log("Bridge Configuration:");
+        console.log(`  Passcode: ${passcode}`);
+        console.log(`  Discriminator: ${discriminator}`);
+        console.log(`  Port: ${port}`);
+        console.log(`  Unique ID: ${uniqueId}\n`);
+
+        // Create Matter ServerNode
+        console.log("Creating Matter ServerNode...");
+        const server = await ServerNode.create({
+            id: uniqueId,
+            network: {
+                port,
+            },
+            commissioning: {
+                passcode,
+                discriminator,
+            },
+            productDescription: {
+                name: "iH8HomeAssistant Bridge",
+                deviceType: AggregatorEndpoint.deviceType,
+            },
+            basicInformation: {
+                vendorName: "matter-node.js",
+                vendorId: VendorId(vendorId),
+                nodeLabel: "iH8HomeAssistant Bridge",
+                productName: "MQTT to Matter Bridge",
+                productLabel: "iH8HomeAssistant",
+                productId,
+                serialNumber: `ih8ha-${uniqueId}`,
+                uniqueId,
+            },
+        });
+        console.log("ServerNode created successfully\n");
+
+        // Create AggregatorEndpoint (bridge container)
+        console.log("Creating AggregatorEndpoint...");
+        const aggregator = new Endpoint(AggregatorEndpoint, { id: "aggregator" });
+        await server.add(aggregator);
+        console.log("AggregatorEndpoint added to server\n");
+
+        // Initialize MQTT client
+        console.log("Initializing MQTT client...");
+        const mqttClient = new MqttClient(config.broker);
+
+        // Add all devices from configuration
+        console.log(`Adding ${config.devices.length} bridged devices:\n`);
+
+        // Track device bridges for MQTT message routing
+        const deviceBridges = new Map<string, BaseDevice>();
+
+        for (const device of config.devices) {
+            const endpointId = createEndpointId(device.name);
+            console.log(`  [${device.name}]`);
+            console.log(`    Type: ${device.type}`);
+            console.log(`    Endpoint ID: ${endpointId}`);
+
+            // Get the appropriate Matter device type
+            const DeviceType = getDeviceType(device.type);
+
+            // Create configuration for the endpoint
+            const endpointConfig: any = {
+                id: endpointId,
+                bridgedDeviceBasicInformation: {
+                    nodeLabel: device.name,
+                    productName: device.name,
+                    productLabel: device.name,
+                    serialNumber: `ih8-${endpointId}`, // Max 32 chars
+                    reachable: true,
+                },
+                // All devices support on/off
+                onOff: {
+                    onOff: true, // Initialize to ON
+                },
+            };
+
+            // Dimmable devices (including ExtendedColorLightDevice) need level control
+            if (device.type === "DimmableLightDevice" || device.type === "ExtendedColorLightDevice") {
+                endpointConfig.levelControl = {
+                    currentLevel: 254, // Initialize to max brightness (0-254 range)
+                };
+            }
+
+            // ExtendedColorLightDevice requires additional color control configuration
+            if (device.type === "ExtendedColorLightDevice") {
+                // Configure for RGB (Hue/Saturation) with color temperature support
+                // With HueSaturation feature enabled, we can now initialize hue/saturation
+                endpointConfig.colorControl = {
+                    colorMode: 0, // CurrentHue and CurrentSaturation (RGB mode)
+                    enhancedColorMode: 0, // CurrentHue and CurrentSaturation
+                    currentHue: 0, // Initialize to red (0-254 range)
+                    currentSaturation: 254, // Initialize to fully saturated (0-254 range)
+                    colorTempPhysicalMinMireds: 147, // ~6800K (required by Matter spec)
+                    colorTempPhysicalMaxMireds: 500, // ~2000K (required by Matter spec)
+                    coupleColorTempToLevelMinMireds: 147, // Required when CT is supported
+                    remainingTime: 0,
+                    options: { executeIfOff: true }, // Allow color changes when light is off
+                    numberOfPrimaries: 0,
+                };
+            }
+
+            // Create the bridged endpoint
+            const endpoint = new Endpoint(DeviceType, endpointConfig);
+
+            // Add the device to the aggregator
+            await aggregator.add(endpoint);
+
+            // Create device bridge for MQTT/Matter integration
+            const deviceBridge = DeviceFactory.createDevice(device, endpoint, mqttClient);
+            deviceBridges.set(device.name, deviceBridge);
+
+            // Set up identify event handlers
+            endpoint.events.identify.startIdentifying.on(() => {
+                console.log(`[${device.name}] Identify requested - should blink/identify device`);
+                // TODO: Trigger MQTT identification if supported by device
+            });
+
+            endpoint.events.identify.stopIdentifying.on(() => {
+                console.log(`[${device.name}] Stop identifying`);
+            });
+
+            console.log(`    Status: Added successfully\n`);
+        }
+
+        console.log("All devices configured\n");
+
+        // Connect to MQTT broker
+        console.log("Connecting to MQTT broker...");
+        try {
+            await mqttClient.connect();
+        } catch (error) {
+            console.error("Failed to connect to MQTT broker:");
+            console.error(error);
+            console.error("\nCannot proceed without MQTT connection.");
+            process.exit(1);
+        }
+
+        // Initialize all device bridges
+        console.log("\nInitializing device bridges...");
+        for (const bridge of deviceBridges.values()) {
+            await bridge.initialize();
+        }
+
+        // Set up MQTT message routing
+        mqttClient.onMessage((topic, payload) => {
+            // Route messages to the appropriate device bridge
+            for (const bridge of deviceBridges.values()) {
+                bridge.handleMqttMessage(topic, payload);
+            }
+        });
+
+        console.log("All device bridges initialized\n");
+
+        // Start the Matter server
+        console.log("Starting Matter server...");
+        console.log("The server will generate a QR code for commissioning.\n");
+        console.log("=".repeat(60));
+
+        await server.start();
+
+        console.log("\n" + "=".repeat(60));
+        console.log("\nMatter bridge is running!");
+        console.log(`\n${config.devices.length} devices are now available:\n`);
+
+        config.devices.forEach((device, idx) => {
+            console.log(`  ${idx + 1}. ${device.name} (${device.type})`);
+        });
+
+        console.log("\nNext steps:");
+        console.log("  1. Scan the QR code with a Matter controller (Apple Home, Google Home, etc.)");
+        console.log("  2. Complete the pairing process");
+        console.log("  3. All devices should appear in your controller");
+        console.log("  4. Control devices through Matter - changes will sync to MQTT");
+        console.log("  5. Control devices through MQTT - changes will sync to Matter\n");
+
+        console.log("Press Ctrl+C to stop the bridge\n");
+
+        // Handle graceful shutdown
+        process.on("SIGINT", async () => {
+            console.log("\n\nShutting down gracefully...");
+            await mqttClient.disconnect();
+            process.exit(0);
+        });
+
+    } catch (error) {
+        console.error("\nFailed to start Matter bridge:");
+        console.error(error);
+        process.exit(1);
+    }
+}
+
+// Run the bootstrap function
+bootstrap().catch(error => {
+    console.error("Unexpected error:", error);
+    process.exit(1);
+});
