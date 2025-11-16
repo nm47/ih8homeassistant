@@ -1,0 +1,37 @@
+{
+    "name": "@ih8homeassistant/bridge",
+    "version": "0.1.0",
+    "description": "MQTT to Matter bridge using matter.js",
+    "type": "module",
+    "main": "dist/index.js",
+    "scripts": {
+        "build": "tsc",
+        "build:watch": "tsc --watch",
+        "start": "node --enable-source-maps dist/index.js",
+        "dev": "tsc && node --enable-source-maps dist/index.js",
+        "clean": "rm -rf dist build"
+    },
+    "keywords": [
+        "matter",
+        "mqtt",
+        "bridge",
+        "smart-home",
+        "iot"
+    ],
+    "author": "",
+    "license": "Apache-2.0",
+    "dependencies": {
+        "@matter/main": "*",
+        "@matter/node": "*",
+        "@matter/nodejs": "*",
+        "@matter/mqtt": "*",
+        "toml": "^3.0.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "typescript": "^5.0.0"
+    },
+    "engines": {
+        "node": ">=20.19.0 <22.0.0 || >=22.13.0"
+    }
+}

@@ -1,0 +1,49 @@
+{
+    "compilerOptions": {
+        // Output configuration
+        "outDir": "./dist",
+        "rootDir": "./src",
+        "sourceMap": true,
+
+        // Module system
+        "target": "es2022",
+        "module": "node16",
+        "moduleResolution": "node16",
+        "lib": ["es2022", "ESNext.Disposable", "dom"],
+
+        // Type checking
+        "strict": true,
+        "noImplicitAny": true,
+        "strictNullChecks": true,
+        "strictFunctionTypes": true,
+        "strictBindCallApply": true,
+        "strictPropertyInitialization": true,
+        "noImplicitThis": true,
+        "alwaysStrict": true,
+
+        // Additional checks
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        "noImplicitReturns": true,
+        "noFallthroughCasesInSwitch": true,
+        "noImplicitOverride": true,
+
+        // Module resolution
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true,
+        "resolveJsonModule": true,
+        "isolatedModules": true,
+
+        // Other
+        "skipLibCheck": true,
+        "types": ["node"]
+    },
+    "include": [
+        "src/**/*"
+    ],
+    "exclude": [
+        "node_modules",
+        "dist",
+        "build"
+    ]
+}
