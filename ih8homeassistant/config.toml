@@ -1,5 +1,5 @@
 [broker]
-host = "192.168.50.74"
+host = "127.0.0.1"
 port = 1883
 user = ""
 pass = ""
@@ -39,6 +39,7 @@ setOn     = "nudge/command/power"
 [devices.options]
 onValue   = "ON"
 offValue  = "OFF"
+onlineValue = "online"
 hex       = true
 hexPrefix = "#"
 
