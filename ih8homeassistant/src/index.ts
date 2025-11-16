@@ -10,17 +10,12 @@
 import "@matter/main/platform";
 
 import { Endpoint, Environment, ServerNode, StorageService, VendorId } from "@matter/main";
-import { BridgedDeviceBasicInformationServer } from "@matter/main/behaviors/bridged-device-basic-information";
-import { ColorControlServer } from "@matter/main/behaviors/color-control";
-import { OnOffPlugInUnitDevice } from "@matter/main/devices/on-off-plug-in-unit";
-import { OnOffLightDevice } from "@matter/main/devices/on-off-light";
-import { ExtendedColorLightDevice } from "@matter/main/devices/extended-color-light";
 import { AggregatorEndpoint } from "@matter/main/endpoints/aggregator";
 import { ConfigParser } from "./config/ConfigParser.js";
-import type { DeviceConfig } from "./types/config.js";
 import { MqttClient } from "./mqtt/MqttClient.js";
 import { DeviceFactory } from "./mqtt/devices/DeviceFactory.js";
-import type { BaseDevice } from "./mqtt/devices/BaseDevice.js";
+import { DeviceRegistry } from "./mqtt/devices/registry.js";
+import type { BaseDeviceInterface } from "./mqtt/devices/metadata.js";
 import { join } from "path";
 
 /**
@@ -28,29 +23,6 @@ import { join } from "path";
  */
 function createEndpointId(deviceName: string): string {
     return deviceName.toLowerCase().replace(/\s+/g, "-");
-}
-
-/**
- * Map configuration device type to Matter.js device class with BridgedDeviceBasicInformationServer
- */
-function getDeviceType(deviceType: DeviceConfig["type"]) {
-    switch (deviceType) {
-        case "OnOffPlugInUnitDevice":
-            return OnOffPlugInUnitDevice.with(BridgedDeviceBasicInformationServer);
-        case "OnOffLightDevice":
-            return OnOffLightDevice.with(BridgedDeviceBasicInformationServer);
-        case "DimmableLightDevice":
-            // For now, treat dimmable as OnOffLight until we add level control
-            return OnOffLightDevice.with(BridgedDeviceBasicInformationServer);
-        case "ExtendedColorLightDevice":
-            // Enable HueSaturation feature for RGB color wheel support
-            return ExtendedColorLightDevice.with(
-                BridgedDeviceBasicInformationServer,
-                ColorControlServer.with("HueSaturation", "Xy", "ColorTemperature")
-            );
-        default:
-            throw new Error(`Unsupported device type: ${deviceType}`);
-    }
 }
 
 /**
@@ -141,7 +113,7 @@ async function bootstrap(): Promise<void> {
         console.log(`Adding ${config.devices.length} bridged devices:\n`);
 
         // Track device bridges for MQTT message routing
-        const deviceBridges = new Map<string, BaseDevice>();
+        const deviceBridges = new Map<string, BaseDeviceInterface>();
 
         for (const device of config.devices) {
             const endpointId = createEndpointId(device.name);
@@ -149,52 +121,23 @@ async function bootstrap(): Promise<void> {
             console.log(`    Type: ${device.type}`);
             console.log(`    Endpoint ID: ${endpointId}`);
 
-            // Get the appropriate Matter device type
-            const DeviceType = getDeviceType(device.type);
+            // Get device metadata
+            const metadata = DeviceRegistry.getMetadata(device.type);
+            if (!metadata) {
+                throw new Error(`No metadata found for device type: ${device.type}`);
+            }
 
-            // Create configuration for the endpoint
-            const endpointConfig: any = {
+            // Get Matter device type from metadata
+            const DeviceType = metadata.getMatterDeviceType()(device);
+
+            // Get endpoint configuration from metadata
+            const metadataConfig = metadata.createEndpointConfig(device);
+
+            // Create the bridged endpoint with ID and state from metadata
+            const endpoint = new Endpoint(DeviceType, {
                 id: endpointId,
-                bridgedDeviceBasicInformation: {
-                    nodeLabel: device.name,
-                    productName: device.name,
-                    productLabel: device.name,
-                    serialNumber: `ih8-${endpointId}`, // Max 32 chars
-                    reachable: true,
-                },
-                // All devices support on/off
-                onOff: {
-                    onOff: true, // Initialize to ON
-                },
-            };
-
-            // Dimmable devices (including ExtendedColorLightDevice) need level control
-            if (device.type === "DimmableLightDevice" || device.type === "ExtendedColorLightDevice") {
-                endpointConfig.levelControl = {
-                    currentLevel: 254, // Initialize to max brightness (0-254 range)
-                };
-            }
-
-            // ExtendedColorLightDevice requires additional color control configuration
-            if (device.type === "ExtendedColorLightDevice") {
-                // Configure for RGB (Hue/Saturation) with color temperature support
-                // With HueSaturation feature enabled, we can now initialize hue/saturation
-                endpointConfig.colorControl = {
-                    colorMode: 0, // CurrentHue and CurrentSaturation (RGB mode)
-                    enhancedColorMode: 0, // CurrentHue and CurrentSaturation
-                    currentHue: 0, // Initialize to red (0-254 range)
-                    currentSaturation: 254, // Initialize to fully saturated (0-254 range)
-                    colorTempPhysicalMinMireds: 147, // ~6800K (required by Matter spec)
-                    colorTempPhysicalMaxMireds: 500, // ~2000K (required by Matter spec)
-                    coupleColorTempToLevelMinMireds: 147, // Required when CT is supported
-                    remainingTime: 0,
-                    options: { executeIfOff: true }, // Allow color changes when light is off
-                    numberOfPrimaries: 0,
-                };
-            }
-
-            // Create the bridged endpoint
-            const endpoint = new Endpoint(DeviceType, endpointConfig);
+                ...metadataConfig.state,
+            } as any);
 
             // Add the device to the aggregator
             await aggregator.add(endpoint);
@@ -206,7 +149,6 @@ async function bootstrap(): Promise<void> {
             // Set up identify event handlers
             endpoint.events.identify.startIdentifying.on(() => {
                 console.log(`[${device.name}] Identify requested - should blink/identify device`);
-                // TODO: Trigger MQTT identification if supported by device
             });
 
             endpoint.events.identify.stopIdentifying.on(() => {

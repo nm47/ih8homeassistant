@@ -60,3 +60,16 @@ name = "Reading Lamp"
 getOnline = "reading_lamp/tele/LWT"
 getOn     = "reading_lamp/stat/POWER"
 setOn     = "reading_lamp/cmnd/POWER"
+
+[[devices]]
+type = "GenericSwitchDevice"
+name = "blup"
+
+[devices.topics]
+getOnline  = "blup/status/online"
+setCommand = "blup/command/bubble"
+
+[devices.options]
+onlineValue  = "online"
+offlineValue = "offline"
+commandValue = ""

@@ -1,49 +1,18 @@
 /**
  * Device type definitions for Matter.js device classes
+ *
+ * Note: This file is now minimal as device types are registered dynamically
+ * via the DeviceRegistry. Each device class exports its own metadata and config types.
  */
 
 /**
  * Supported Matter.js device types
+ * These are now dynamically registered in the DeviceRegistry
+ * Query DeviceRegistry.getRegisteredTypes() for the current list
  */
 export type MatterDeviceType =
     | "OnOffPlugInUnitDevice"
     | "OnOffLightDevice"
     | "DimmableLightDevice"
-    | "ExtendedColorLightDevice";
-
-/**
- * Type guard to check if a device type supports color
- */
-export function isColorDevice(type: MatterDeviceType): type is "ExtendedColorLightDevice" {
-    return type === "ExtendedColorLightDevice";
-}
-
-/**
- * Type guard to check if a device type supports brightness/level control
- */
-export function isDimmableDevice(
-    type: MatterDeviceType
-): type is "DimmableLightDevice" | "ExtendedColorLightDevice" {
-    return type === "DimmableLightDevice" || type === "ExtendedColorLightDevice";
-}
-
-/**
- * Type guard to check if a device type is on/off only
- */
-export function isOnOffDevice(
-    type: MatterDeviceType
-): type is "OnOffPlugInUnitDevice" | "OnOffLightDevice" {
-    return type === "OnOffPlugInUnitDevice" || type === "OnOffLightDevice";
-}
-
-/**
- * Validate that a string is a valid Matter device type
- */
-export function isValidDeviceType(type: string): type is MatterDeviceType {
-    return (
-        type === "OnOffPlugInUnitDevice" ||
-        type === "OnOffLightDevice" ||
-        type === "DimmableLightDevice" ||
-        type === "ExtendedColorLightDevice"
-    );
-}
+    | "ExtendedColorLightDevice"
+    | "GenericSwitchDevice";

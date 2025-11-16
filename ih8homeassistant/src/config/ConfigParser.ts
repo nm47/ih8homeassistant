@@ -1,17 +1,11 @@
 import { readFileSync } from "fs";
 import { parse } from "toml";
-import {
-    BridgeConfig,
-    BrokerConfig,
-    DeviceConfig,
-    OnOffDeviceConfig,
-    DimmableDeviceConfig,
-    ExtendedColorDeviceConfig,
-    DEFAULT_BASE_OPTIONS,
-    DEFAULT_COLOR_OPTIONS,
-    DEFAULT_MQTT_SETTINGS,
-} from "../types/config.js";
-import { isValidDeviceType } from "../types/devices.js";
+import type { BridgeConfig, BrokerConfig } from "../types/config.js";
+import { DEFAULT_MQTT_SETTINGS } from "../types/config.js";
+import { DeviceRegistry } from "../mqtt/devices/registry.js";
+
+// Import devices to trigger registration
+import "../mqtt/devices/index.js";
 
 /**
  * Error thrown when configuration validation fails
@@ -29,8 +23,6 @@ export class ConfigValidationError extends Error {
 export class ConfigParser {
     /**
      * Load configuration from a TOML file
-     * @param filePath Path to the TOML configuration file
-     * @returns Parsed and validated bridge configuration
      */
     static loadFromFile(filePath: string): BridgeConfig {
         let content: string;
@@ -47,8 +39,6 @@ export class ConfigParser {
 
     /**
      * Parse TOML configuration string
-     * @param content TOML configuration content
-     * @returns Parsed and validated bridge configuration
      */
     static parse(content: string): BridgeConfig {
         let raw: unknown;
@@ -140,7 +130,7 @@ export class ConfigParser {
     /**
      * Parse and validate devices array
      */
-    private static parseDevices(raw: unknown): DeviceConfig[] {
+    private static parseDevices(raw: unknown): any[] {
         if (!Array.isArray(raw)) {
             throw new ConfigValidationError("devices must be an array");
         }
@@ -153,19 +143,25 @@ export class ConfigParser {
     }
 
     /**
-     * Parse and validate a single device configuration
+     * Parse and validate a single device configuration using metadata
      */
-    private static parseDevice(raw: unknown, index: number): DeviceConfig {
+    private static parseDevice(raw: unknown, index: number): any {
         if (!this.isRecord(raw)) {
-            throw new ConfigValidationError(
-                `devices[${index}] must be an object`
-            );
+            throw new ConfigValidationError(`devices[${index}] must be an object`);
         }
 
         const type = raw.type;
-        if (typeof type !== "string" || !isValidDeviceType(type)) {
+        if (typeof type !== "string") {
             throw new ConfigValidationError(
-                `devices[${index}].type must be a valid device type (OnOffPlugInUnitDevice, OnOffLightDevice, DimmableLightDevice, or ExtendedColorLightDevice)`
+                `devices[${index}].type must be a string`
+            );
+        }
+
+        // Check if device type is registered
+        if (!DeviceRegistry.isRegistered(type)) {
+            const availableTypes = DeviceRegistry.getRegisteredTypes();
+            throw new ConfigValidationError(
+                `devices[${index}].type "${type}" is not a valid device type. Available types: ${availableTypes.join(", ")}`
             );
         }
 
@@ -176,191 +172,24 @@ export class ConfigParser {
             );
         }
 
-        // TypeScript discriminated union handling
-        if (type === "OnOffPlugInUnitDevice" || type === "OnOffLightDevice") {
-            const topics = this.parseTopics(raw.topics, type, index);
-            const options = this.parseOptions(raw.options, type, index);
-            return { type, name, topics, options } as OnOffDeviceConfig;
-        } else if (type === "DimmableLightDevice") {
-            const topics = this.parseTopics(raw.topics, type, index);
-            const options = this.parseOptions(raw.options, type, index);
-            return { type, name, topics, options } as DimmableDeviceConfig;
-        } else {
-            // ExtendedColorLightDevice
-            const topics = this.parseTopics(raw.topics, type, index);
-            const options = this.parseOptions(raw.options, type, index);
-            return { type, name, topics, options } as ExtendedColorDeviceConfig;
-        }
-    }
+        // Build device config object
+        const deviceConfig: any = {
+            type,
+            name,
+            topics: raw.topics || {},
+            options: raw.options || {},
+        };
 
-    /**
-     * Parse and validate device topics based on device type
-     */
-    private static parseTopics(
-        raw: unknown,
-        type: string,
-        deviceIndex: number
-    ): DeviceConfig["topics"] {
-        if (!this.isRecord(raw)) {
+        // Use device metadata for validation
+        const validationResult = DeviceRegistry.validateConfig(deviceConfig);
+
+        if (!validationResult.valid) {
             throw new ConfigValidationError(
-                `devices[${deviceIndex}].topics must be an object`
+                `devices[${index}] validation failed:\n  ${validationResult.errors.join("\n  ")}`
             );
         }
 
-        // Validate base topics (required for all devices)
-        const getOnline = raw.getOnline;
-        if (typeof getOnline !== "string" || getOnline.length === 0) {
-            throw new ConfigValidationError(
-                `devices[${deviceIndex}].topics.getOnline must be a non-empty string`
-            );
-        }
-
-        const getOn = raw.getOn;
-        if (typeof getOn !== "string" || getOn.length === 0) {
-            throw new ConfigValidationError(
-                `devices[${deviceIndex}].topics.getOn must be a non-empty string`
-            );
-        }
-
-        const setOn = raw.setOn;
-        if (typeof setOn !== "string" || setOn.length === 0) {
-            throw new ConfigValidationError(
-                `devices[${deviceIndex}].topics.setOn must be a non-empty string`
-            );
-        }
-
-        // For on/off only devices, return base topics
-        if (type === "OnOffPlugInUnitDevice" || type === "OnOffLightDevice") {
-            return { getOnline, getOn, setOn };
-        }
-
-        // Validate level topics (required for dimmable and color devices)
-        const getBrightness = raw.getBrightness;
-        if (typeof getBrightness !== "string" || getBrightness.length === 0) {
-            throw new ConfigValidationError(
-                `devices[${deviceIndex}].topics.getBrightness must be a non-empty string for ${type}`
-            );
-        }
-
-        const setBrightness = raw.setBrightness;
-        if (typeof setBrightness !== "string" || setBrightness.length === 0) {
-            throw new ConfigValidationError(
-                `devices[${deviceIndex}].topics.setBrightness must be a non-empty string for ${type}`
-            );
-        }
-
-        // For dimmable devices, return level topics
-        if (type === "DimmableLightDevice") {
-            return { getOnline, getOn, setOn, getBrightness, setBrightness };
-        }
-
-        // Validate color topics (required for color devices)
-        const getRGB = raw.getRGB;
-        if (typeof getRGB !== "string" || getRGB.length === 0) {
-            throw new ConfigValidationError(
-                `devices[${deviceIndex}].topics.getRGB must be a non-empty string for ExtendedColorLightDevice`
-            );
-        }
-
-        const setRGB = raw.setRGB;
-        if (typeof setRGB !== "string" || setRGB.length === 0) {
-            throw new ConfigValidationError(
-                `devices[${deviceIndex}].topics.setRGB must be a non-empty string for ExtendedColorLightDevice`
-            );
-        }
-
-        return { getOnline, getOn, setOn, getBrightness, setBrightness, getRGB, setRGB };
-    }
-
-    /**
-     * Parse and validate device options, applying defaults
-     * Always returns a complete options object with all required fields
-     */
-    private static parseOptions(
-        raw: unknown,
-        type: string,
-        deviceIndex: number
-    ): Required<typeof DEFAULT_BASE_OPTIONS> | Required<typeof DEFAULT_COLOR_OPTIONS> {
-        if (raw === undefined) {
-            // Return defaults based on device type
-            return type === "ExtendedColorLightDevice"
-                ? { ...DEFAULT_COLOR_OPTIONS }
-                : { ...DEFAULT_BASE_OPTIONS };
-        }
-
-        if (!this.isRecord(raw)) {
-            throw new ConfigValidationError(
-                `devices[${deviceIndex}].options must be an object`
-            );
-        }
-
-        // Start with defaults (which are already Required types)
-        const defaults =
-            type === "ExtendedColorLightDevice"
-                ? DEFAULT_COLOR_OPTIONS
-                : DEFAULT_BASE_OPTIONS;
-
-        const options = { ...defaults };
-
-        // Override with provided values
-        if (raw.onValue !== undefined) {
-            if (typeof raw.onValue !== "string") {
-                throw new ConfigValidationError(
-                    `devices[${deviceIndex}].options.onValue must be a string`
-                );
-            }
-            options.onValue = raw.onValue;
-        }
-
-        if (raw.offValue !== undefined) {
-            if (typeof raw.offValue !== "string") {
-                throw new ConfigValidationError(
-                    `devices[${deviceIndex}].options.offValue must be a string`
-                );
-            }
-            options.offValue = raw.offValue;
-        }
-
-        if (raw.onlineValue !== undefined) {
-            if (typeof raw.onlineValue !== "string") {
-                throw new ConfigValidationError(
-                    `devices[${deviceIndex}].options.onlineValue must be a string`
-                );
-            }
-            options.onlineValue = raw.onlineValue;
-        }
-
-        if (raw.offlineValue !== undefined) {
-            if (typeof raw.offlineValue !== "string") {
-                throw new ConfigValidationError(
-                    `devices[${deviceIndex}].options.offlineValue must be a string`
-                );
-            }
-            options.offlineValue = raw.offlineValue;
-        }
-
-        // Color-specific options
-        if (type === "ExtendedColorLightDevice") {
-            if (raw.hex !== undefined) {
-                if (typeof raw.hex !== "boolean") {
-                    throw new ConfigValidationError(
-                        `devices[${deviceIndex}].options.hex must be a boolean`
-                    );
-                }
-                (options as Required<typeof DEFAULT_COLOR_OPTIONS>).hex = raw.hex;
-            }
-
-            if (raw.hexPrefix !== undefined) {
-                if (typeof raw.hexPrefix !== "string") {
-                    throw new ConfigValidationError(
-                        `devices[${deviceIndex}].options.hexPrefix must be a string`
-                    );
-                }
-                (options as Required<typeof DEFAULT_COLOR_OPTIONS>).hexPrefix = raw.hexPrefix;
-            }
-        }
-
-        return options;
+        return deviceConfig;
     }
 
     /**

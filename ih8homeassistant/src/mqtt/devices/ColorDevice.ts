@@ -3,55 +3,173 @@
  * Supports: ExtendedColorLightDevice
  */
 
-import { DimmableDevice } from "./DimmableDevice.js";
-import type { ExtendedColorDeviceConfig } from "../../types/config.js";
+import type { Endpoint } from "@matter/main";
+import { ExtendedColorLightDevice } from "@matter/main/devices/extended-color-light";
+import { BridgedDeviceBasicInformationServer } from "@matter/main/behaviors/bridged-device-basic-information";
+import { ColorControlServer } from "@matter/main/behaviors/color-control";
+import type { MqttClient } from "../MqttClient.js";
+import type {
+    BaseDeviceInterface,
+    DeviceMetadata,
+    EndpointConfiguration,
+    ValidationResult,
+} from "./metadata.js";
+import {
+    createValidationResult,
+    validateTopics,
+    applyOptionDefaults,
+} from "./metadata.js";
+import {
+    mqttToMatterBrightness,
+    matterToMqttBrightness,
+    parseBrightness,
+} from "../../utils/BrightnessConverter.js";
 import { hexToHsv, hsvToHex } from "../../utils/ColorConverter.js";
 
-export class ColorDevice extends DimmableDevice {
+/**
+ * Configuration for Color devices
+ */
+export interface ColorDeviceConfig {
+    type: "ExtendedColorLightDevice";
+    name: string;
+    topics: {
+        getOnline: string;
+        getOn: string;
+        setOn: string;
+        getBrightness: string;
+        setBrightness: string;
+        getRGB: string;
+        setRGB: string;
+    };
+    options: {
+        onValue: string;
+        offValue: string;
+        onlineValue: string;
+        offlineValue: string;
+        hex: boolean;
+        hexPrefix: string;
+    };
+}
+
+/**
+ * Color device implementation
+ */
+export class ColorDevice implements BaseDeviceInterface {
     private currentHue = 0;
     private currentSaturation = 0;
     private publishRgbTimeout: NodeJS.Timeout | null = null;
 
-    protected get colorConfig(): ExtendedColorDeviceConfig {
-        return this.config as ExtendedColorDeviceConfig;
-    }
+    constructor(
+        public readonly config: ColorDeviceConfig,
+        public readonly endpoint: Endpoint,
+        public readonly mqttClient: MqttClient
+    ) {}
 
-    protected override getAdditionalTopics(): string[] {
-        return [
-            ...super.getAdditionalTopics(),
-            this.colorConfig.topics.getRGB,
+    /**
+     * Initialize device: subscribe to topics and setup handlers
+     */
+    async initialize(): Promise<void> {
+        const topics = [
+            this.config.topics.getOnline,
+            this.config.topics.getOn,
+            this.config.topics.getBrightness,
+            this.config.topics.getRGB,
         ];
+        await this.mqttClient.subscribe(topics);
+        this.setupMatterEventHandlers();
+        console.log(`[${this.config.name}] ColorDevice initialized`);
     }
 
-    protected override handleAdditionalMqttMessage(topic: string, message: string): void {
-        if (topic === this.colorConfig.topics.getRGB) {
+    /**
+     * Handle incoming MQTT messages
+     */
+    handleMqttMessage(topic: string, payload: Buffer): void {
+        const message = payload.toString();
+
+        if (topic === this.config.topics.getOnline) {
+            this.handleAvailability(message);
+        } else if (topic === this.config.topics.getOn) {
+            this.handleOnOffState(message);
+        } else if (topic === this.config.topics.getBrightness) {
+            this.handleBrightnessState(message);
+        } else if (topic === this.config.topics.getRGB) {
             this.handleRGBState(message);
-        } else {
-            super.handleAdditionalMqttMessage(topic, message);
         }
     }
 
-    protected override handleBrightnessState(message: string): void {
-        super.handleBrightnessState(message);
-        // No need to track currentValue - we'll read it from state when needed
+    /**
+     * Handle device availability updates
+     */
+    protected handleAvailability(message: string): void {
+        const isOnline = message === this.config.options.onlineValue;
+        console.log(`[${this.config.name}] Availability: ${isOnline ? "online" : "offline"}`);
+
+        this.endpoint
+            .set({
+                bridgedDeviceBasicInformation: {
+                    reachable: isOnline,
+                },
+            } as any)
+            .catch((error) => {
+                console.error(`[${this.config.name}] Failed to update reachable status:`, error);
+            });
     }
 
+    /**
+     * Handle on/off state updates from MQTT
+     */
+    protected handleOnOffState(message: string): void {
+        const isOn = message === this.config.options.onValue;
+        console.log(`[${this.config.name}] MQTT state: ${isOn ? "ON" : "OFF"}`);
+
+        this.endpoint
+            .set({
+                onOff: {
+                    onOff: isOn,
+                },
+            } as any)
+            .catch((error) => {
+                console.error(`[${this.config.name}] Failed to update on/off state:`, error);
+            });
+    }
+
+    /**
+     * Handle brightness state updates from MQTT
+     */
+    protected handleBrightnessState(message: string): void {
+        const brightness = parseBrightness(message);
+        if (brightness === null) {
+            console.error(`[${this.config.name}] Invalid brightness value: ${message}`);
+            return;
+        }
+
+        console.log(`[${this.config.name}] MQTT brightness: ${brightness}`);
+
+        const matterLevel = mqttToMatterBrightness(brightness);
+        this.endpoint
+            .set({
+                levelControl: {
+                    currentLevel: matterLevel,
+                },
+            } as any)
+            .catch((error) => {
+                console.error(`[${this.config.name}] Failed to update brightness:`, error);
+            });
+    }
+
+    /**
+     * Handle RGB state updates from MQTT
+     */
     protected handleRGBState(message: string): void {
         console.log(`[${this.config.name}] MQTT RGB: ${message}`);
 
-        // Parse RGB hex value
-        const prefix = this.colorConfig.options.hex ? this.colorConfig.options.hexPrefix : undefined;
+        const prefix = this.config.options.hex ? this.config.options.hexPrefix : undefined;
         const hsv = hexToHsv(message, prefix);
 
         if (!hsv) {
             console.error(`[${this.config.name}] Invalid RGB value: ${message}`);
             return;
         }
-
-        // NOTE: currentHue and currentSaturation are read-only attributes in Matter.
-        // They can only be changed via commands (MoveToHue, MoveToSaturation, etc.)
-        // For bridged devices, color control is one-way: Matter -> MQTT only.
-        // MQTT color updates are ignored to avoid conformance violations.
 
         console.log(`[${this.config.name}] MQTT color update ignored (Matter controls color for this device)`);
 
@@ -60,35 +178,31 @@ export class ColorDevice extends DimmableDevice {
         this.currentSaturation = hsv.saturation;
     }
 
-    protected override setupAdditionalMatterEventHandlers(): void {
-        super.setupAdditionalMatterEventHandlers();
+    /**
+     * Setup Matter event handlers
+     */
+    protected setupMatterEventHandlers(): void {
+        const events = this.endpoint.events as any;
 
-        const colorEndpoint = this.endpoint as any;
+        // On/Off events
+        if (events.onOff?.onOff$Changed) {
+            events.onOff.onOff$Changed.on((value: boolean) => {
+                this.handleMatterOnOffChange(value);
+            });
+        }
 
+        // Brightness events
+        if (events.levelControl?.currentLevel$Changed) {
+            events.levelControl.currentLevel$Changed.on((value: number) => {
+                this.handleMatterBrightnessChange(value);
+            });
+        }
+
+        // Color control events
         console.log(`[${this.config.name}] Setting up color event handlers...`);
 
-        // Log all available events on colorControl
-        if (colorEndpoint.events?.colorControl) {
-            const eventNames = Object.keys(colorEndpoint.events.colorControl);
-            console.log(`[${this.config.name}] Available colorControl events:`, eventNames);
-        }
-
-        // Log general endpoint interaction events
-        if (colorEndpoint.events?.interactionBegin) {
-            colorEndpoint.events.interactionBegin.on((data: any) => {
-                console.log(`[${this.config.name}] Interaction begin:`, data);
-            });
-        }
-
-        if (colorEndpoint.events?.interactionEnd) {
-            colorEndpoint.events.interactionEnd.on((data: any) => {
-                console.log(`[${this.config.name}] Interaction end:`, data);
-            });
-        }
-
-        // Try to listen to specific attribute changes
-        if (colorEndpoint.events?.colorControl?.currentHue$Changed) {
-            colorEndpoint.events.colorControl.currentHue$Changed.on((value: number) => {
+        if (events.colorControl?.currentHue$Changed) {
+            events.colorControl.currentHue$Changed.on((value: number) => {
                 console.log(`[${this.config.name}] currentHue$Changed event: ${value}`);
                 if (value !== this.currentHue) {
                     this.currentHue = value;
@@ -98,8 +212,8 @@ export class ColorDevice extends DimmableDevice {
             console.log(`[${this.config.name}] currentHue$Changed handler registered`);
         }
 
-        if (colorEndpoint.events?.colorControl?.currentSaturation$Changed) {
-            colorEndpoint.events.colorControl.currentSaturation$Changed.on((value: number) => {
+        if (events.colorControl?.currentSaturation$Changed) {
+            events.colorControl.currentSaturation$Changed.on((value: number) => {
                 console.log(`[${this.config.name}] currentSaturation$Changed event: ${value}`);
                 if (value !== this.currentSaturation) {
                     this.currentSaturation = value;
@@ -109,16 +223,14 @@ export class ColorDevice extends DimmableDevice {
             console.log(`[${this.config.name}] currentSaturation$Changed handler registered`);
         }
 
-        // Use stateChanged event as fallback
-        if (colorEndpoint.events?.colorControl?.stateChanged) {
-            colorEndpoint.events.colorControl.stateChanged.on((state: any) => {
+        if (events.colorControl?.stateChanged) {
+            events.colorControl.stateChanged.on((state: any) => {
                 console.log(`[${this.config.name}] ColorControl stateChanged:`, {
                     hue: state.currentHue,
                     saturation: state.currentSaturation,
-                    colorMode: state.colorMode
+                    colorMode: state.colorMode,
                 });
 
-                // Only process if hue/saturation actually changed
                 if (state.currentHue !== undefined && state.currentHue !== this.currentHue) {
                     this.currentHue = state.currentHue;
                     this.debouncedPublishRGB();
@@ -148,9 +260,28 @@ export class ColorDevice extends DimmableDevice {
         }
     }
 
-    protected override handleMatterBrightnessChange(value: number): void {
-        super.handleMatterBrightnessChange(value);
-        // Brightness changed - also update RGB since it affects the final color
+    /**
+     * Handle Matter on/off state change
+     */
+    protected handleMatterOnOffChange(value: boolean): void {
+        const mqttPayload = value ? this.config.options.onValue : this.config.options.offValue;
+        console.log(`[${this.config.name}] Matter state changed to: ${value ? "ON" : "OFF"}`);
+        this.mqttClient
+            .publish(this.config.topics.setOn, mqttPayload)
+            .catch((error) => console.error(`[${this.config.name}] Failed to publish on/off:`, error));
+    }
+
+    /**
+     * Handle Matter brightness change
+     */
+    protected handleMatterBrightnessChange(value: number): void {
+        console.log(`[${this.config.name}] Matter brightness changed to: ${value}`);
+        const mqttBrightness = matterToMqttBrightness(value);
+        this.mqttClient
+            .publish(this.config.topics.setBrightness, mqttBrightness.toString())
+            .catch((error) => console.error(`[${this.config.name}] Failed to publish brightness:`, error));
+
+        // Brightness affects RGB, so update that too
         this.debouncedPublishRGB();
     }
 
@@ -158,24 +289,21 @@ export class ColorDevice extends DimmableDevice {
      * Debounced RGB publish to avoid multiple publishes when hue+saturation change together
      */
     private debouncedPublishRGB(): void {
-        // Clear any pending publish
         if (this.publishRgbTimeout) {
             clearTimeout(this.publishRgbTimeout);
         }
 
-        // Schedule new publish after a short delay
         this.publishRgbTimeout = setTimeout(() => {
             this.publishRGB();
             this.publishRgbTimeout = null;
-        }, 50); // 50ms debounce
+        }, 50);
     }
 
     /**
      * Publish RGB color to MQTT, reading current brightness from Matter state
      */
     private publishRGB(): void {
-        // Read current brightness/value from Matter state
-        let currentValue = 254; // Default to max brightness
+        let currentValue = 254;
         try {
             const state = this.endpoint.state as any;
             if (state?.levelControl?.currentLevel !== undefined) {
@@ -185,7 +313,7 @@ export class ColorDevice extends DimmableDevice {
             console.warn(`[${this.config.name}] Could not read current brightness, using default`);
         }
 
-        const prefix = this.colorConfig.options.hex ? this.colorConfig.options.hexPrefix : undefined;
+        const prefix = this.config.options.hex ? this.config.options.hexPrefix : undefined;
         const rgbHex = hsvToHex(
             {
                 hue: this.currentHue,
@@ -197,7 +325,127 @@ export class ColorDevice extends DimmableDevice {
 
         console.log(`[${this.config.name}] Publishing RGB: ${rgbHex} (H:${this.currentHue} S:${this.currentSaturation} V:${currentValue})`);
         this.mqttClient
-            .publish(this.colorConfig.topics.setRGB, rgbHex)
-            .catch(error => console.error(`[${this.config.name}] Failed to publish RGB:`, error));
+            .publish(this.config.topics.setRGB, rgbHex)
+            .catch((error) => console.error(`[${this.config.name}] Failed to publish RGB:`, error));
     }
+
+    /**
+     * Device metadata
+     */
+    static metadata: DeviceMetadata = {
+        typeName: "ColorDevice",
+
+        capabilities: new Set(["availability", "onoff", "dimming", "color"]),
+
+        topicSchema: {
+            required: ["getOnline", "getOn", "setOn", "getBrightness", "setBrightness", "getRGB", "setRGB"],
+            optional: [],
+        },
+
+        optionSchema: {
+            onValue: {
+                type: "string",
+                default: "ON",
+                description: "Value representing 'on' state",
+            },
+            offValue: {
+                type: "string",
+                default: "OFF",
+                description: "Value representing 'off' state",
+            },
+            onlineValue: {
+                type: "string",
+                default: "Online",
+                description: "Value representing 'online' state",
+            },
+            offlineValue: {
+                type: "string",
+                default: "Offline",
+                description: "Value representing 'offline' state",
+            },
+            hex: {
+                type: "boolean",
+                default: false,
+                description: "Whether RGB values use hex format",
+            },
+            hexPrefix: {
+                type: "string",
+                default: "#",
+                description: "Hex prefix if hex is true",
+            },
+        },
+
+        validateConfig(config: any): ValidationResult {
+            const errors: string[] = [];
+
+            if (!config.name) {
+                errors.push("Missing device name");
+            }
+
+            if (config.type !== "ExtendedColorLightDevice") {
+                errors.push(`Invalid type for ColorDevice: ${config.type}`);
+            }
+
+            // Validate topics
+            errors.push(...validateTopics(config, this.topicSchema, config.name || "unknown"));
+
+            // Apply option defaults
+            config.options = applyOptionDefaults(config, this.optionSchema);
+
+            return createValidationResult(errors);
+        },
+
+        createEndpointConfig(config: ColorDeviceConfig): EndpointConfiguration {
+            return {
+                state: {
+                    bridgedDeviceBasicInformation: {
+                        nodeLabel: config.name,
+                        productName: config.name,
+                        productLabel: config.name,
+                        serialNumber: `ih8-${config.name.toLowerCase().replace(/\s+/g, "-")}`,
+                        reachable: true,
+                    },
+                    onOff: {
+                        onOff: true,
+                    },
+                    levelControl: {
+                        currentLevel: 254,
+                    },
+                    colorControl: {
+                        colorMode: 0,
+                        enhancedColorMode: 0,
+                        currentHue: 0,
+                        currentSaturation: 254,
+                        colorTempPhysicalMinMireds: 147,
+                        colorTempPhysicalMaxMireds: 500,
+                        coupleColorTempToLevelMinMireds: 147,
+                        remainingTime: 0,
+                        options: { executeIfOff: true },
+                        numberOfPrimaries: 0,
+                    },
+                },
+                topics: [
+                    config.topics.getOnline,
+                    config.topics.getOn,
+                    config.topics.getBrightness,
+                    config.topics.getRGB,
+                ],
+            };
+        },
+
+        getMatterDeviceType() {
+            return () =>
+                ExtendedColorLightDevice.with(
+                    BridgedDeviceBasicInformationServer,
+                    ColorControlServer.with("HueSaturation", "Xy", "ColorTemperature")
+                );
+        },
+
+        getMatterBehaviors() {
+            return [
+                BridgedDeviceBasicInformationServer,
+                ColorControlServer.with("HueSaturation", "Xy", "ColorTemperature"),
+            ];
+        },
+    };
 }

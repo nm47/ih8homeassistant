@@ -1,12 +1,13 @@
 /**
- * On/Off devices: switches and basic lights
- * Supports: OnOffPlugInUnitDevice, OnOffLightDevice
+ * Momentary switch devices: stateless buttons that trigger actions
+ * Supports: GenericSwitchDevice (with MomentarySwitch feature)
  */
 
 import type { Endpoint } from "@matter/main";
-import { OnOffPlugInUnitDevice } from "@matter/main/devices/on-off-plug-in-unit";
-import { OnOffLightDevice } from "@matter/main/devices/on-off-light";
+import { GenericSwitchDevice } from "@matter/main/devices/generic-switch";
 import { BridgedDeviceBasicInformationServer } from "@matter/main/behaviors/bridged-device-basic-information";
+import { SwitchServer } from "@matter/main/behaviors/switch";
+import { Switch } from "@matter/main/clusters/switch";
 import type { MqttClient } from "../MqttClient.js";
 import type {
     BaseDeviceInterface,
@@ -21,30 +22,28 @@ import {
 } from "./metadata.js";
 
 /**
- * Configuration for OnOff devices
+ * Configuration for MomentarySwitch devices
  */
-export interface OnOffDeviceConfig {
-    type: "OnOffPlugInUnitDevice" | "OnOffLightDevice";
+export interface MomentarySwitchDeviceConfig {
+    type: "GenericSwitchDevice";
     name: string;
     topics: {
         getOnline: string;
-        getOn: string;
-        setOn: string;
+        setCommand: string;
     };
     options: {
-        onValue: string;
-        offValue: string;
         onlineValue: string;
         offlineValue: string;
+        commandValue: string;
     };
 }
 
 /**
- * OnOff device implementation
+ * MomentarySwitch device implementation
  */
-export class OnOffDevice implements BaseDeviceInterface {
+export class MomentarySwitchDevice implements BaseDeviceInterface {
     constructor(
-        public readonly config: OnOffDeviceConfig,
+        public readonly config: MomentarySwitchDeviceConfig,
         public readonly endpoint: Endpoint,
         public readonly mqttClient: MqttClient
     ) {}
@@ -53,10 +52,10 @@ export class OnOffDevice implements BaseDeviceInterface {
      * Initialize device: subscribe to topics and setup handlers
      */
     async initialize(): Promise<void> {
-        const topics = [this.config.topics.getOnline, this.config.topics.getOn];
+        const topics = [this.config.topics.getOnline];
         await this.mqttClient.subscribe(topics);
         this.setupMatterEventHandlers();
-        console.log(`[${this.config.name}] OnOffDevice initialized`);
+        console.log(`[${this.config.name}] MomentarySwitchDevice initialized`);
     }
 
     /**
@@ -67,8 +66,6 @@ export class OnOffDevice implements BaseDeviceInterface {
 
         if (topic === this.config.topics.getOnline) {
             this.handleAvailability(message);
-        } else if (topic === this.config.topics.getOn) {
-            this.handleOnOffState(message);
         }
     }
 
@@ -91,70 +88,44 @@ export class OnOffDevice implements BaseDeviceInterface {
     }
 
     /**
-     * Handle on/off state updates from MQTT
-     */
-    protected handleOnOffState(message: string): void {
-        const isOn = message === this.config.options.onValue;
-        console.log(`[${this.config.name}] MQTT state: ${isOn ? "ON" : "OFF"}`);
-
-        this.endpoint
-            .set({
-                onOff: {
-                    onOff: isOn,
-                },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update on/off state:`, error);
-            });
-    }
-
-    /**
-     * Setup Matter event handlers
+     * Setup Matter event handlers for momentary switch
      */
     protected setupMatterEventHandlers(): void {
         const events = this.endpoint.events as any;
-        if (events.onOff?.onOff$Changed) {
-            events.onOff.onOff$Changed.on((value: boolean) => {
-                this.handleMatterOnOffChange(value);
+
+        if (events.switch?.initialPress$Changed) {
+            events.switch.initialPress$Changed.on((value: { newPosition: number }) => {
+                this.handleMatterButtonPress(value.newPosition);
             });
         }
     }
 
     /**
-     * Handle Matter on/off state change
+     * Handle Matter button press - publish to MQTT command topic
      */
-    protected handleMatterOnOffChange(value: boolean): void {
-        const mqttPayload = value ? this.config.options.onValue : this.config.options.offValue;
-        console.log(`[${this.config.name}] Matter state changed to: ${value ? "ON" : "OFF"}`);
+    protected handleMatterButtonPress(position: number): void {
+        console.log(`[${this.config.name}] Button pressed (position: ${position})`);
+
+        const payload = this.config.options.commandValue;
         this.mqttClient
-            .publish(this.config.topics.setOn, mqttPayload)
-            .catch((error) => console.error(`[${this.config.name}] Failed to publish on/off:`, error));
+            .publish(this.config.topics.setCommand, payload)
+            .catch((error) => console.error(`[${this.config.name}] Failed to publish command:`, error));
     }
 
     /**
      * Device metadata
      */
     static metadata: DeviceMetadata = {
-        typeName: "OnOffDevice",
+        typeName: "MomentarySwitchDevice",
 
-        capabilities: new Set(["availability", "onoff"]),
+        capabilities: new Set(["availability", "switch"]),
 
         topicSchema: {
-            required: ["getOnline", "getOn", "setOn"],
+            required: ["getOnline", "setCommand"],
             optional: [],
         },
 
         optionSchema: {
-            onValue: {
-                type: "string",
-                default: "ON",
-                description: "Value representing 'on' state",
-            },
-            offValue: {
-                type: "string",
-                default: "OFF",
-                description: "Value representing 'off' state",
-            },
             onlineValue: {
                 type: "string",
                 default: "Online",
@@ -165,6 +136,11 @@ export class OnOffDevice implements BaseDeviceInterface {
                 default: "Offline",
                 description: "Value representing 'offline' state",
             },
+            commandValue: {
+                type: "string",
+                default: "",
+                description: "Value to publish when button is pressed",
+            },
         },
 
         validateConfig(config: any): ValidationResult {
@@ -174,8 +150,8 @@ export class OnOffDevice implements BaseDeviceInterface {
                 errors.push("Missing device name");
             }
 
-            if (!config.type || (config.type !== "OnOffPlugInUnitDevice" && config.type !== "OnOffLightDevice")) {
-                errors.push(`Invalid type for OnOffDevice: ${config.type}`);
+            if (config.type !== "GenericSwitchDevice") {
+                errors.push(`Invalid type for MomentarySwitchDevice: ${config.type}`);
             }
 
             // Validate topics
@@ -187,7 +163,7 @@ export class OnOffDevice implements BaseDeviceInterface {
             return createValidationResult(errors);
         },
 
-        createEndpointConfig(config: OnOffDeviceConfig): EndpointConfiguration {
+        createEndpointConfig(config: MomentarySwitchDeviceConfig): EndpointConfiguration {
             return {
                 state: {
                     bridgedDeviceBasicInformation: {
@@ -197,28 +173,28 @@ export class OnOffDevice implements BaseDeviceInterface {
                         serialNumber: `ih8-${config.name.toLowerCase().replace(/\s+/g, "-")}`,
                         reachable: true,
                     },
-                    onOff: {
-                        onOff: true,
+                    switch: {
+                        numberOfPositions: 2,
+                        currentPosition: 0,
                     },
                 },
-                topics: [config.topics.getOnline, config.topics.getOn],
+                topics: [config.topics.getOnline],
             };
         },
 
         getMatterDeviceType() {
-            // This will be determined at runtime based on config.type
-            // Return a factory function that takes the config
-            return (config: OnOffDeviceConfig) => {
-                if (config.type === "OnOffPlugInUnitDevice") {
-                    return OnOffPlugInUnitDevice.with(BridgedDeviceBasicInformationServer);
-                } else {
-                    return OnOffLightDevice.with(BridgedDeviceBasicInformationServer);
-                }
-            };
+            return () =>
+                GenericSwitchDevice.with(
+                    BridgedDeviceBasicInformationServer,
+                    SwitchServer.with(Switch.Feature.MomentarySwitch)
+                );
         },
 
         getMatterBehaviors() {
-            return [BridgedDeviceBasicInformationServer];
+            return [
+                BridgedDeviceBasicInformationServer,
+                SwitchServer.with(Switch.Feature.MomentarySwitch),
+            ];
         },
     };
 }
