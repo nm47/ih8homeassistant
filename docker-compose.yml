@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  ih8homeassistant:
+    build:
+      context: ./ih8homeassistant
+      dockerfile: Dockerfile
+    container_name: ih8homeassistant-bridge
+    restart: unless-stopped
+
+    # Use host network for Matter mDNS discovery
+    # Required for Matter device discovery to work properly
+    network_mode: host
+
+    volumes:
+      # Mount source code for live development
+      - ./ih8homeassistant:/app:delegated
+
+      # Mount matter.js workspace dependency
+      - ./matter.js:/matter.js:delegated
+
+      # Persistent storage for Matter device state
+      - ih8homeassistant-storage:/app/.matter
+
+      # Prevent node_modules from being overwritten by host
+      - /app/node_modules
+      - /matter.js/node_modules
+
+    working_dir: /app
+
+    environment:
+      # Storage location for Matter.js persistence
+      - STORAGE_PATH=.matter
+      # Override these via .env file if needed
+      # - PASSCODE=20202021
+      # - DISCRIMINATOR=3840
+      # - PORT=5540
+
+    # Install dependencies and run dev script
+    command: sh -c "npm install && npm run dev"
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # Persistent volume for Matter device state
+  ih8homeassistant-storage:
+    driver: local
