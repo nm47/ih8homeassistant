@@ -1,8 +1,6 @@
 # Example: Adding a New Device Type
 
-This document demonstrates how easy it is to add a new device type to the bridge after the metadata refactoring.
-
-## After the Refactoring
+This document demonstrates how easy it is to add a new device type to the bridge.
 
 Adding a new device type requires modifying **2 files**:
 
