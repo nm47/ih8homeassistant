@@ -60,23 +60,11 @@ interface DeviceConfig {
 }
 ```
 
-## Supported Device Types
+## Supported Matter Types
 
-### Switch
-- **Matter Type**: `OnOffPluginUnit`
-- **MQTT → Matter**: Maps ON/OFF to boolean
-- **Matter → MQTT**: Sends configured on/off values
-
-### Lightbulb-OnOff
-- **Matter Type**: `OnOffLight`
-- **MQTT → Matter**: Maps ON/OFF to boolean
-- **Matter → MQTT**: Sends configured on/off values
-
-### Lightbulb-RGB
-- **Matter Type**: `ExtendedColorLight`
-- **MQTT → Matter**: Converts hex RGB to HSV
-- **Matter → MQTT**: Converts HSV to hex RGB
-- **Features**: On/Off, Color (Hue/Saturation), Brightness
+- `OnOffPluginUnit` (switches)
+- `OnOffLight`
+- `ExtendedColorLight` (rgb and dimmable lights)
 
 ## Development
 
