@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   ih8homeassistant:
     build:
