@@ -17,6 +17,7 @@ import { DeviceFactory } from "./mqtt/devices/DeviceFactory.js";
 import { DeviceRegistry } from "./mqtt/devices/registry.js";
 import type { BaseDeviceInterface } from "./mqtt/devices/metadata.js";
 import { join } from "path";
+import { existsSync } from "fs";
 
 /**
  * Create a sanitized endpoint ID from device name
@@ -32,9 +33,19 @@ async function bootstrap(): Promise<void> {
     console.log("=== ih8homeassistant - MQTT to Matter Bridge ===\n");
 
     try {
-        // Load configuration
-        const configPath = join(process.cwd(), "config.toml");
-        console.log(`Loading configuration from: ${configPath}`);
+        // Load configuration - prefer mounted config from /app/config/, fall back to local
+        const preferredConfigPath = join(process.cwd(), "config", "config.toml");
+        const fallbackConfigPath = join(process.cwd(), "config.toml");
+
+        let configPath: string;
+        if (existsSync(preferredConfigPath)) {
+            configPath = preferredConfigPath;
+            console.log(`Using centralized config from: ${configPath}`);
+        } else {
+            configPath = fallbackConfigPath;
+            console.log(`Using local config from: ${configPath}`);
+        }
+
         const config = ConfigParser.loadFromFile(configPath);
         console.log(`Loaded ${config.devices.length} device(s) from configuration\n`);
 
