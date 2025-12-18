@@ -403,7 +403,7 @@ export class ColorDevice implements BaseDeviceInterface {
                         productName: config.name,
                         productLabel: config.name,
                         serialNumber: `ih8-${config.name.toLowerCase().replace(/\s+/g, "-")}`,
-                        reachable: true,
+                        reachable: false,
                     },
                     onOff: {
                         onOff: true,
