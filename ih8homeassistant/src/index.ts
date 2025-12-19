@@ -171,6 +171,14 @@ async function bootstrap(): Promise<void> {
 
         console.log("All devices configured\n");
 
+        // Set up MQTT message routing BEFORE connecting/subscribing
+        mqttClient.onMessage((topic, payload) => {
+            // Route messages to the appropriate device bridge
+            for (const bridge of deviceBridges.values()) {
+                bridge.handleMqttMessage(topic, payload);
+            }
+        });
+
         // Connect to MQTT broker
         console.log("Connecting to MQTT broker...");
         try {
@@ -187,14 +195,6 @@ async function bootstrap(): Promise<void> {
         for (const bridge of deviceBridges.values()) {
             await bridge.initialize();
         }
-
-        // Set up MQTT message routing
-        mqttClient.onMessage((topic, payload) => {
-            // Route messages to the appropriate device bridge
-            for (const bridge of deviceBridges.values()) {
-                bridge.handleMqttMessage(topic, payload);
-            }
-        });
 
         console.log("All device bridges initialized\n");
 
