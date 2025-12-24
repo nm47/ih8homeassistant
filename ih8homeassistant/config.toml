@@ -73,3 +73,18 @@ setCommand = "blup/command/bubble"
 onlineValue  = "online"
 offlineValue = "offline"
 commandValue = ""
+
+[[devices]]
+type = "TVDevice"
+name = "Living Room TV"
+
+[devices.topics]
+getOnline = "tele/tv/LWT"
+getState  = "tele/tv/STATE"
+setPower  = "cmnd/tv/POWER"
+
+[devices.options]
+onValue      = "ON"
+offValue     = "OFF"
+onlineValue  = "Online"
+offlineValue = "Offline"

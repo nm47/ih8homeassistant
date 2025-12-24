@@ -8,6 +8,7 @@ import { OnOffDevice } from "./OnOffDevice.js";
 import { DimmableDevice } from "./DimmableDevice.js";
 import { ColorDevice } from "./ColorDevice.js";
 import { MomentarySwitchDevice } from "./MomentarySwitchDevice.js";
+import { TVDevice } from "./TVDevice.js";
 
 /**
  * Register OnOffDevice for both PlugInUnit and Light types
@@ -31,12 +32,18 @@ DeviceRegistry.register("ExtendedColorLightDevice", ColorDevice.metadata, ColorD
 DeviceRegistry.register("GenericSwitchDevice", MomentarySwitchDevice.metadata, MomentarySwitchDevice as any);
 
 /**
+ * Register TVDevice
+ */
+DeviceRegistry.register("TVDevice", TVDevice.metadata, TVDevice as any);
+
+/**
  * Export all device classes
  */
 export { OnOffDevice } from "./OnOffDevice.js";
 export { DimmableDevice } from "./DimmableDevice.js";
 export { ColorDevice } from "./ColorDevice.js";
 export { MomentarySwitchDevice } from "./MomentarySwitchDevice.js";
+export { TVDevice } from "./TVDevice.js";
 
 /**
  * Export metadata and registry
