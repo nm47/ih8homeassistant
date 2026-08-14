@@ -9,7 +9,7 @@
  */
 import "@matter/main/platform";
 
-import { Endpoint, Environment, ServerNode, StorageService, VendorId } from "@matter/main";
+import { CommissioningServer, Endpoint, Environment, ServerNode, StorageService, VendorId } from "@matter/main";
 import { AggregatorEndpoint } from "@matter/main/endpoints/aggregator";
 import { ConfigParser } from "./config/ConfigParser.js";
 import { MqttClient } from "./mqtt/MqttClient.js";
@@ -20,10 +20,75 @@ import { join } from "path";
 import { existsSync } from "fs";
 
 /**
+ * Re-arm well inside matter.js's 900s DEVICE_ANNOUNCEMENT_DURATION_MS
+ */
+const COMMISSIONING_KEEPALIVE_MS = 10 * 60 * 1000;
+
+/**
  * Create a sanitized endpoint ID from device name
  */
 function createEndpointId(deviceName: string): string {
     return deviceName.toLowerCase().replace(/\s+/g, "-");
+}
+
+/**
+ * Commissioning behavior that can re-open the pairing window quietly
+ */
+class BridgeCommissioningServer extends CommissioningServer {
+    /**
+     * Set only for the duration of a keep-alive refresh, so the periodic re-arm does not
+     * re-print the QR code and pairing credentials every cycle. Startup and matter.js's own
+     * post-factory-reset announcement still get the full block.
+     */
+    #suppressPairingCodeLog = false;
+
+    /**
+     * Re-arm the commissioning window without re-announcing the pairing credentials
+     */
+    refreshCommissioning(): void {
+        this.#suppressPairingCodeLog = true;
+        try {
+            this.enterCommissionableMode();
+        } finally {
+            this.#suppressPairingCodeLog = false;
+        }
+    }
+
+    protected override initiateCommissioning(): void {
+        if (this.#suppressPairingCodeLog) {
+            return;
+        }
+        super.initiateCommissioning();
+    }
+}
+
+/**
+ * matter.js stops commissioning announcements 15 minutes after they start and never
+ * restarts them. Re-arm on a timer so the printed QR code stays valid until the bridge is
+ * actually commissioned.
+ */
+function keepCommissioningWindowOpen(server: ServerNode): NodeJS.Timeout {
+    const timer = setInterval(() => {
+        void (async () => {
+            // Skipped while commissioned; resumes automatically if the node is later
+            // decommissioned, since matter.js factory-resets and comes back uncommissioned
+            if (!server.lifecycle.isOnline || server.lifecycle.isCommissioned) {
+                return;
+            }
+
+            try {
+                await server.act(agent => agent.get(BridgeCommissioningServer).refreshCommissioning());
+                // Advertising is asynchronous and swallows its own errors, so this only
+                // reports that the re-arm was requested - not that it succeeded
+                console.log("Commissioning window re-arm requested");
+            } catch (error) {
+                console.error("Failed to request commissioning window re-arm:", error);
+            }
+        })();
+    }, COMMISSIONING_KEEPALIVE_MS);
+
+    timer.unref();
+    return timer;
 }
 
 /**
@@ -84,7 +149,7 @@ async function bootstrap(): Promise<void> {
 
         // Create Matter ServerNode
         console.log("Creating Matter ServerNode...");
-        const server = await ServerNode.create({
+        const server = await ServerNode.create(ServerNode.RootEndpoint.with(BridgeCommissioningServer), {
             id: uniqueId,
             network: {
                 port,
@@ -205,6 +270,9 @@ async function bootstrap(): Promise<void> {
 
         await server.start();
 
+        // Keep the pairing window open so the QR code above stays scannable
+        const commissioningKeepAlive = keepCommissioningWindowOpen(server);
+
         console.log("\n" + "=".repeat(60));
         console.log("\nMatter bridge is running!");
         console.log(`\n${config.devices.length} devices are now available:\n`);
@@ -225,6 +293,7 @@ async function bootstrap(): Promise<void> {
         // Handle graceful shutdown
         process.on("SIGINT", async () => {
             console.log("\n\nShutting down gracefully...");
+            clearInterval(commissioningKeepAlive);
             await mqttClient.disconnect();
             process.exit(0);
         });
