@@ -27,12 +27,11 @@ services:
     working_dir: /app
 
     environment:
-      # Storage location for Matter.js persistence
-      - STORAGE_PATH=.matter
-      # Override these via .env file if needed
-      # - PASSCODE=20202021
-      # - DISCRIMINATOR=3840
-      # - PORT=5540
+      # Storage location for Matter.js persistence.
+      # Matter.js only reads MATTER_-prefixed vars; MATTER_STORAGE_PATH -> storage.path.
+      # Without the prefix this is ignored and state lands in $HOME/.matter instead,
+      # outside the volume below.
+      - MATTER_STORAGE_PATH=/app/.matter
 
     # Install dependencies and run dev script
     command: sh -c "npm install && npm run dev"
