@@ -22,9 +22,10 @@ import type {
 } from "./metadata.js";
 import {
     createValidationResult,
-    validateTopics,
-    applyOptionDefaults,
+    validateDeviceConfig,
+    matchToken,
 } from "./metadata.js";
+import { onControllerChange } from "./matterEvents.js";
 
 /**
  * Configuration for TV devices
@@ -87,18 +88,42 @@ export class TVDevice implements BaseDeviceInterface {
      * Handle device availability updates
      */
     protected handleAvailability(message: string): void {
-        const isOnline = message === this.config.options.onlineValue;
-        console.log(`[${this.config.name}] Availability: ${isOnline ? "online" : "offline"}`);
+        const isOnline = matchToken(
+            message,
+            this.config.options.onlineValue,
+            this.config.options.offlineValue
+        );
+
+        if (isOnline === null) {
+            console.warn(`[${this.config.name}] Ignoring unrecognized availability value: ${message}`);
+            return;
+        }
+
+        this.setReachable(isOnline);
+    }
+
+    /**
+     * Set the endpoint's reachable flag
+     */
+    setReachable(reachable: boolean): void {
+        console.log(`[${this.config.name}] Availability: ${reachable ? "online" : "offline"}`);
 
         this.endpoint
             .set({
                 bridgedDeviceBasicInformation: {
-                    reachable: isOnline,
+                    reachable,
                 },
             } as any)
             .catch((error) => {
                 console.error(`[${this.config.name}] Failed to update reachable status:`, error);
             });
+    }
+
+    /**
+     * Release any timers held by this device
+     */
+    close(): void {
+        // No timers to release
     }
 
     /**
@@ -111,7 +136,17 @@ export class TVDevice implements BaseDeviceInterface {
 
             // Extract POWER field
             if (state.POWER !== undefined) {
-                const isOn = state.POWER === this.config.options.onValue;
+                const isOn = matchToken(
+                    String(state.POWER),
+                    this.config.options.onValue,
+                    this.config.options.offValue
+                );
+
+                if (isOn === null) {
+                    console.warn(`[${this.config.name}] Ignoring unrecognized POWER value: ${state.POWER}`);
+                    return;
+                }
+
                 console.log(`[${this.config.name}] MQTT power state from JSON: ${isOn ? "ON" : "OFF"}`);
 
                 this.endpoint
@@ -141,12 +176,11 @@ export class TVDevice implements BaseDeviceInterface {
     protected setupMatterEventHandlers(): void {
         const events = this.endpoint.events as any;
 
-        // On/Off events (TV power control)
-        if (events.onOff?.onOff$Changed) {
-            events.onOff.onOff$Changed.on((value: boolean) => {
-                this.handleMatterPowerChange(value);
-            });
-        }
+        // On/Off events (TV power control). Controller-originated only, so the state we just
+        // applied from the STATE topic is not echoed back as a power command.
+        onControllerChange<boolean>(events.onOff?.onOff$Changed, value =>
+            this.handleMatterPowerChange(value)
+        );
 
         // Future: MediaInput events for input selection
         // if (events.mediaInput?.currentInput$Changed) {
@@ -225,19 +259,16 @@ export class TVDevice implements BaseDeviceInterface {
         validateConfig(config: any): ValidationResult {
             const errors: string[] = [];
 
-            if (!config.name) {
-                errors.push("Missing device name");
-            }
-
             if (config.type !== "TVDevice") {
                 errors.push(`Invalid type for TVDevice: ${config.type}`);
             }
 
-            // Validate topics
-            errors.push(...validateTopics(config, this.topicSchema, config.name || "unknown"));
-
-            // Apply option defaults
-            config.options = applyOptionDefaults(config, this.optionSchema);
+            errors.push(
+                ...validateDeviceConfig(config, this.topicSchema, this.optionSchema, [
+                    ["onValue", "offValue"],
+                    ["onlineValue", "offlineValue"],
+                ]).errors
+            );
 
             return createValidationResult(errors);
         },

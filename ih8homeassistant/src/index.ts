@@ -25,10 +25,46 @@ import { existsSync } from "fs";
 const COMMISSIONING_KEEPALIVE_MS = 10 * 60 * 1000;
 
 /**
+ * Hard deadline for graceful shutdown.
+ *
+ * Docker's default stop_grace_period is 10s, so this must fire first to be of any use.
+ */
+const SHUTDOWN_DEADLINE_MS = 8000;
+
+/**
  * Create a sanitized endpoint ID from device name
  */
 function createEndpointId(deviceName: string): string {
     return deviceName.toLowerCase().replace(/\s+/g, "-");
+}
+
+/**
+ * Reject configurations whose devices would collide at runtime
+ *
+ * createEndpointId lowercases and hyphenates, so "Living Room" and "living-room" produce the
+ * same endpoint, and the bridge map is keyed by name, so duplicates would silently overwrite
+ * each other.
+ */
+function assertUniqueDevices(devices: Array<{ name: string }>): void {
+    const namesSeen = new Map<string, string>();
+    const idsSeen = new Map<string, string>();
+
+    for (const device of devices) {
+        const previousName = namesSeen.get(device.name);
+        if (previousName !== undefined) {
+            throw new Error(`Duplicate device name: "${device.name}" is used more than once`);
+        }
+        namesSeen.set(device.name, device.name);
+
+        const endpointId = createEndpointId(device.name);
+        const previousId = idsSeen.get(endpointId);
+        if (previousId !== undefined) {
+            throw new Error(
+                `Devices "${previousId}" and "${device.name}" both map to endpoint ID "${endpointId}"`
+            );
+        }
+        idsSeen.set(endpointId, device.name);
+    }
 }
 
 /**
@@ -92,6 +128,46 @@ function keepCommissioningWindowOpen(server: ServerNode): NodeJS.Timeout {
 }
 
 /**
+ * Install idempotent SIGINT/SIGTERM handling
+ *
+ * Docker sends SIGTERM, which the old SIGINT-only handler ignored entirely. A second signal
+ * must not re-enter cleanup, and cleanup must not outlast Docker's grace period.
+ */
+function installShutdownHandlers(cleanup: () => Promise<void>): void {
+    let shuttingDown = false;
+
+    const shutdown = (signal: string): void => {
+        if (shuttingDown) {
+            console.log(`\nAlready shutting down, ignoring ${signal}`);
+            return;
+        }
+        shuttingDown = true;
+
+        console.log(`\n\nReceived ${signal}, shutting down gracefully...`);
+
+        const deadline = setTimeout(() => {
+            console.error("Shutdown timed out, forcing exit");
+            process.exit(1);
+        }, SHUTDOWN_DEADLINE_MS);
+
+        void cleanup()
+            .then(() => {
+                console.log("Shutdown complete");
+                clearTimeout(deadline);
+                process.exit(0);
+            })
+            .catch(error => {
+                console.error("Error during shutdown:", error);
+                clearTimeout(deadline);
+                process.exit(1);
+            });
+    };
+
+    process.on("SIGINT", () => shutdown("SIGINT"));
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+/**
  * Main bootstrap function that sets up the Matter bridge
  */
 async function bootstrap(): Promise<void> {
@@ -113,6 +189,8 @@ async function bootstrap(): Promise<void> {
 
         const config = ConfigParser.loadFromFile(configPath);
         console.log(`Loaded ${config.devices.length} device(s) from configuration\n`);
+
+        assertUniqueDevices(config.devices);
 
         // Set up Matter environment and storage
         const environment = Environment.default;
@@ -244,26 +322,25 @@ async function bootstrap(): Promise<void> {
             }
         });
 
-        // Connect to MQTT broker
+        // Surface broker outages in the controller instead of leaving stale values
+        mqttClient.onConnectionChange(connected => {
+            if (connected) {
+                return;
+            }
+            console.warn("MQTT broker unavailable - marking all devices unreachable");
+            for (const bridge of deviceBridges.values()) {
+                bridge.setReachable(false);
+            }
+        });
+
+        // Connect to the MQTT broker. This retries indefinitely and resolves on the first
+        // successful connection, so a broker that is down at startup delays device
+        // subscriptions rather than killing the process.
         console.log("Connecting to MQTT broker...");
-        try {
-            await mqttClient.connect();
-        } catch (error) {
-            console.error("Failed to connect to MQTT broker:");
-            console.error(error);
-            console.error("\nCannot proceed without MQTT connection.");
-            process.exit(1);
-        }
+        const mqttReady = mqttClient.connect();
 
-        // Initialize all device bridges
-        console.log("\nInitializing device bridges...");
-        for (const bridge of deviceBridges.values()) {
-            await bridge.initialize();
-        }
-
-        console.log("All device bridges initialized\n");
-
-        // Start the Matter server
+        // Start the Matter server before waiting on the broker, so the bridge stays
+        // discoverable and controllable even during a broker outage
         console.log("Starting Matter server...");
         console.log("The server will generate a QR code for commissioning.\n");
         console.log("=".repeat(60));
@@ -272,6 +349,27 @@ async function bootstrap(): Promise<void> {
 
         // Keep the pairing window open so the QR code above stays scannable
         const commissioningKeepAlive = keepCommissioningWindowOpen(server);
+
+        // Registered before the broker wait below, so Ctrl-C and docker stop are handled
+        // even while the broker is unreachable
+        installShutdownHandlers(async () => {
+            clearInterval(commissioningKeepAlive);
+            for (const bridge of deviceBridges.values()) {
+                await bridge.close();
+            }
+            await mqttClient.disconnect();
+            await server.close();
+        });
+
+        // Subscriptions need a live connection; mqtt.js reissues them on later reconnects
+        await mqttReady;
+
+        console.log("\nInitializing device bridges...");
+        for (const bridge of deviceBridges.values()) {
+            await bridge.initialize();
+        }
+
+        console.log("All device bridges initialized\n");
 
         console.log("\n" + "=".repeat(60));
         console.log("\nMatter bridge is running!");
@@ -289,14 +387,6 @@ async function bootstrap(): Promise<void> {
         console.log("  5. Control devices through MQTT - changes will sync to Matter\n");
 
         console.log("Press Ctrl+C to stop the bridge\n");
-
-        // Handle graceful shutdown
-        process.on("SIGINT", async () => {
-            console.log("\n\nShutting down gracefully...");
-            clearInterval(commissioningKeepAlive);
-            await mqttClient.disconnect();
-            process.exit(0);
-        });
 
     } catch (error) {
         console.error("\nFailed to start Matter bridge:");

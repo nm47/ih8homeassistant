@@ -6,38 +6,30 @@ services:
     container_name: ih8homeassistant-bridge
     restart: unless-stopped
 
+    # tini as PID 1, so signals are forwarded and children are reaped
+    init: true
+
     # Use host network for Matter mDNS discovery
     # Required for Matter device discovery to work properly
     network_mode: host
 
     volumes:
-      # Mount source code for live development
-      - ./ih8homeassistant:/app:delegated
+      # Fallback config for standalone runs. In this deployment the parent compose file
+      # mounts config/ih8homeassistant to /app/config, which the bridge prefers.
+      - ./ih8homeassistant/config.toml:/app/config.toml:ro
 
-      # Mount matter.js workspace dependency
-      - ./matter.js:/matter.js:delegated
-
-      # Persistent storage for Matter device state
+      # Persistent storage for Matter device state (fabrics, node identity)
       - ih8homeassistant-storage:/app/.matter
-
-      # Prevent node_modules from being overwritten by host
-      - /app/node_modules
-      - /matter.js/node_modules
-
-    working_dir: /app
 
     environment:
       # Storage location for Matter.js persistence.
       # Matter.js only reads MATTER_-prefixed vars; MATTER_STORAGE_PATH -> storage.path.
       # Without the prefix this is ignored and state lands in $HOME/.matter instead,
-      # outside the volume below.
-      - MATTER_STORAGE_PATH=/app/.matter
-
-    # Install dependencies and run dev script
-    command: sh -c "npm install && npm run dev"
+      # outside the volume above.
+      MATTER_STORAGE_PATH: /app/.matter
 
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
         max-size: "10m"
         max-file: "3"

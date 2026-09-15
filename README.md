@@ -60,23 +60,53 @@ interface DeviceConfig {
 }
 ```
 
-## Supported Matter Types
+## Supported Device Types
 
-- `OnOffPluginUnit` (switches)
-- `OnOffLight`
-- `ExtendedColorLight` (rgb and dimmable lights)
+Config `type` values, and the Matter device each maps to:
+
+- `OnOffPlugInUnitDevice` — On/Off Plug-in Unit (switches)
+- `OnOffLightDevice` — On/Off Light
+- `DimmableLightDevice` — Dimmable Light (brightness)
+- `ExtendedColorLightDevice` — Extended Color Light (rgb and dimmable lights)
+- `TVDevice` — On/Off Plug-in Unit, parsing a JSON `STATE` payload for its `POWER` field
+- `GenericSwitchDevice` — a button
+
+The button's `type` string is historical. Matter's Switch cluster reports physical input and
+exposes no commands, so a controller can never press it; the endpoint is an On/Off Plug-in
+Unit treated as a pulse instead. Switching it on publishes `commandValue` to `setCommand` and
+the endpoint reverts to off a second later, ready for the next press.
+
+## Deployment
+
+Dependencies and TypeScript compilation happen when the image is built, so the container only
+runs Node. Rebuild after changing source or dependencies; a plain restart is enough for a
+config change.
+
+```bash
+# After source or dependency changes
+docker compose up -d --build ih8homeassistant
+
+# After a config change
+docker compose restart ih8homeassistant
+```
+
+Docker caches the `npm ci` layer until `package.json` or `package-lock.json` changes, so
+ordinary restarts need no registry access.
 
 ## Development
 
 ```bash
-# Run with hot-reload
+# Compile
+npm run build
+
+# Compile on change
+npm run build:watch
+
+# Compile and run
 npm run dev
 
-# Type checking without building
-npm run type-check
-
-# Lint and fix issues
-npm run lint -- --fix
+# Compile and run the unit tests
+npm test
 
 # Clean build
 npm run clean && npm run build

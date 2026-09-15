@@ -9,6 +9,7 @@
         "build:watch": "tsc --watch",
         "start": "node --enable-source-maps dist/index.js",
         "dev": "tsc && node --enable-source-maps dist/index.js",
+        "test": "tsc && node --test dist/tests/*.test.js",
         "clean": "rm -rf dist build"
     },
     "keywords": [
@@ -21,10 +22,9 @@
     "author": "",
     "license": "Apache-2.0",
     "dependencies": {
-        "@matter/main": "*",
-        "@matter/node": "*",
-        "@matter/nodejs": "*",
-        "@matter/mqtt": "*",
+        "@matter/main": "0.15.6",
+        "@matter/nodejs": "0.15.6",
+        "mqtt": "^5.14.1",
         "toml": "^3.0.0"
     },
     "devDependencies": {

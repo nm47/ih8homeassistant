@@ -1,31 +1,30 @@
-# Development Dockerfile for ih8homeassistant MQTT-to-Matter bridge
-# Source code will be mounted as volumes, this just provides the runtime environment
+# Image for the ih8homeassistant MQTT-to-Matter bridge.
+#
+# Dependencies and compilation happen at build time; startup only executes Node, so Docker's
+# SIGTERM reaches the bridge directly instead of a wrapping shell.
 
 FROM node:22.13-slim
 
-# Install dependencies needed for building native modules and runtime
+WORKDIR /app
+
+# Toolchain for any dependency that needs to build a native module
 RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
     git \
-    dnsutils \
-    iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
-# Create app directory
-WORKDIR /app
+# Separate layer so npm ci is only rerun when the manifest or lockfile changes
+COPY package.json package-lock.json ./
+RUN npm ci
 
-# Set environment variables
-ENV NODE_ENV=development
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build
+
+# Set after the build: the TypeScript devDependencies are needed above
+ENV NODE_ENV=production
 ENV NODE_OPTIONS="--enable-source-maps"
 
-# Expose Matter port (default 5540)
-EXPOSE 5540/tcp
-EXPOSE 5540/udp
-
-# mDNS port
-EXPOSE 5353/udp
-
-# Default command (can be overridden in docker-compose)
-CMD ["npm", "run", "dev"]
+CMD ["node", "dist/index.js"]

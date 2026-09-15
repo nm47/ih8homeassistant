@@ -172,12 +172,14 @@ export class ConfigParser {
             );
         }
 
-        // Build device config object
+        // Build device config object.
+        // Nullish coalescing, not ||: falsy-but-invalid values such as false, 0 or "" must
+        // reach the device's shape validation rather than being rewritten to {} here.
         const deviceConfig: any = {
             type,
             name,
-            topics: raw.topics || {},
-            options: raw.options || {},
+            topics: raw.topics ?? {},
+            options: raw.options ?? {},
         };
 
         // Use device metadata for validation

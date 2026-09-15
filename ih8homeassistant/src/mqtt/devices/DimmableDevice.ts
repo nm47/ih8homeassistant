@@ -4,7 +4,7 @@
  */
 
 import type { Endpoint } from "@matter/main";
-import { OnOffLightDevice } from "@matter/main/devices/on-off-light";
+import { DimmableLightDevice } from "@matter/main/devices/dimmable-light";
 import { BridgedDeviceBasicInformationServer } from "@matter/main/behaviors/bridged-device-basic-information";
 import type { MqttClient } from "../MqttClient.js";
 import type {
@@ -15,9 +15,10 @@ import type {
 } from "./metadata.js";
 import {
     createValidationResult,
-    validateTopics,
-    applyOptionDefaults,
+    validateDeviceConfig,
+    matchToken,
 } from "./metadata.js";
+import { onControllerChange } from "./matterEvents.js";
 import {
     mqttToMatterBrightness,
     matterToMqttBrightness,
@@ -88,13 +89,30 @@ export class DimmableDevice implements BaseDeviceInterface {
      * Handle device availability updates
      */
     protected handleAvailability(message: string): void {
-        const isOnline = message === this.config.options.onlineValue;
-        console.log(`[${this.config.name}] Availability: ${isOnline ? "online" : "offline"}`);
+        const isOnline = matchToken(
+            message,
+            this.config.options.onlineValue,
+            this.config.options.offlineValue
+        );
+
+        if (isOnline === null) {
+            console.warn(`[${this.config.name}] Ignoring unrecognized availability value: ${message}`);
+            return;
+        }
+
+        this.setReachable(isOnline);
+    }
+
+    /**
+     * Set the endpoint's reachable flag
+     */
+    setReachable(reachable: boolean): void {
+        console.log(`[${this.config.name}] Availability: ${reachable ? "online" : "offline"}`);
 
         this.endpoint
             .set({
                 bridgedDeviceBasicInformation: {
-                    reachable: isOnline,
+                    reachable,
                 },
             } as any)
             .catch((error) => {
@@ -103,10 +121,23 @@ export class DimmableDevice implements BaseDeviceInterface {
     }
 
     /**
+     * Release any timers held by this device
+     */
+    close(): void {
+        // No timers to release
+    }
+
+    /**
      * Handle on/off state updates from MQTT
      */
     protected handleOnOffState(message: string): void {
-        const isOn = message === this.config.options.onValue;
+        const isOn = matchToken(message, this.config.options.onValue, this.config.options.offValue);
+
+        if (isOn === null) {
+            console.warn(`[${this.config.name}] Ignoring unrecognized on/off value: ${message}`);
+            return;
+        }
+
         console.log(`[${this.config.name}] MQTT state: ${isOn ? "ON" : "OFF"}`);
 
         this.endpoint
@@ -150,19 +181,15 @@ export class DimmableDevice implements BaseDeviceInterface {
     protected setupMatterEventHandlers(): void {
         const events = this.endpoint.events as any;
 
-        // On/Off events
-        if (events.onOff?.onOff$Changed) {
-            events.onOff.onOff$Changed.on((value: boolean) => {
-                this.handleMatterOnOffChange(value);
-            });
-        }
+        // Controller-originated only, so state applied from MQTT above is not echoed back as
+        // an MQTT command.
+        onControllerChange<boolean>(events.onOff?.onOff$Changed, value =>
+            this.handleMatterOnOffChange(value)
+        );
 
-        // Brightness events
-        if (events.levelControl?.currentLevel$Changed) {
-            events.levelControl.currentLevel$Changed.on((value: number) => {
-                this.handleMatterBrightnessChange(value);
-            });
-        }
+        onControllerChange<number>(events.levelControl?.currentLevel$Changed, value =>
+            this.handleMatterBrightnessChange(value)
+        );
     }
 
     /**
@@ -226,19 +253,16 @@ export class DimmableDevice implements BaseDeviceInterface {
         validateConfig(config: any): ValidationResult {
             const errors: string[] = [];
 
-            if (!config.name) {
-                errors.push("Missing device name");
-            }
-
             if (config.type !== "DimmableLightDevice") {
                 errors.push(`Invalid type for DimmableDevice: ${config.type}`);
             }
 
-            // Validate topics
-            errors.push(...validateTopics(config, this.topicSchema, config.name || "unknown"));
-
-            // Apply option defaults
-            config.options = applyOptionDefaults(config, this.optionSchema);
+            errors.push(
+                ...validateDeviceConfig(config, this.topicSchema, this.optionSchema, [
+                    ["onValue", "offValue"],
+                    ["onlineValue", "offlineValue"],
+                ]).errors
+            );
 
             return createValidationResult(errors);
         },
@@ -265,7 +289,10 @@ export class DimmableDevice implements BaseDeviceInterface {
         },
 
         getMatterDeviceType() {
-            return () => OnOffLightDevice.with(BridgedDeviceBasicInformationServer);
+            // DimmableLightDevice, not OnOffLightDevice: Level Control is optional on the
+            // latter and would not be installed, while this device supplies and reads
+            // levelControl state.
+            return () => DimmableLightDevice.with(BridgedDeviceBasicInformationServer);
         },
 
         getMatterBehaviors() {
