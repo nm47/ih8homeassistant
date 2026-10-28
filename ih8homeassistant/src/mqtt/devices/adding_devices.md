@@ -165,7 +165,8 @@ export { MotionSensorDevice } from "./MotionSensorDevice.js";
 
 ### Step 3: Add it to the config
 
-`id`, `room` and `matter` are required on every device; see the README for all the fields.
+`id`, `room`, `kind` and `matter` are required on every device; see the README for all the fields. `kind` is what
+the device is to a person, from `DEVICE_KINDS` in `src/types/config.ts`. If none fits, add one there.
 
 ```toml
 [[devices]]
@@ -173,6 +174,7 @@ type = "OccupancySensorDevice"
 name = "Living Room Motion"
 id = "living_room_motion"
 room = "living room"
+kind = "sensor"
 matter = true
 topics = { getOnline = "motion/livingroom/LWT", getMotion = "motion/livingroom/state" }
 options = { motionDetectedValue = "motion", noMotionValue = "clear" }

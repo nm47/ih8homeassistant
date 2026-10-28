@@ -23,6 +23,14 @@ export interface BrokerConfig {
 }
 
 /**
+ * What a device is to a person, not its hardware: the reading lamp is a plug but a light.
+ * "The lights in the den" means the den's devices of kind light. Printers are on-only in
+ * Matter and need a person's confirmation to switch off.
+ */
+export const DEVICE_KINDS = ["light", "tv", "printer", "notifier", "cooler"] as const;
+export type DeviceKind = (typeof DEVICE_KINDS)[number];
+
+/**
  * Generic device configuration
  * Specific device types define their own config interfaces with full type safety
  */
@@ -38,12 +46,10 @@ export interface DeviceConfig {
     room: string;
     /** Other names the MCP tools accept for this device */
     aliases: string[];
-    /** Printers are on-only in Matter and need a person's confirmation to switch off */
-    printer: boolean;
     /** Whether Matter controllers see this device */
     matter: boolean;
-    /** Free-text description, e.g. "light switch"; defaults from the type */
-    kind: string;
+    /** What the device is to a person; see DEVICE_KINDS */
+    kind: DeviceKind;
     topics: Record<string, string>;
     options: Record<string, any>;
 }

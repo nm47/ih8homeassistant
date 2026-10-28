@@ -70,8 +70,7 @@ name    = "Trident"
 id      = "trident"
 room    = "den"
 aliases = ["printer", "3d printer"]
-kind    = "plug for the Voron Trident 3D printer"
-printer = true
+kind    = "printer"
 matter  = true
 
 [devices.topics]
@@ -87,10 +86,9 @@ getState  = "tele/trident/STATE"
 | `name` | yes | Display name. **Matter derives the endpoint ID from it**, so renaming a Matter device makes every phone and hub see a new device and lose the old one's room and automations. |
 | `id` | yes | Stable name for the MCP tools: lowercase letters, digits and underscores |
 | `room` | yes | Room-wide MCP commands switch everything in the room except printers |
+| `kind` | yes | What the device is to a person, not its hardware: `light`, `tv`, `printer`, `notifier` or `cooler`. A lamp on a plug is a `light`; "the lights in the den" means the den's devices of kind `light`. See [Printers](#printers) for `printer`, which only on/off types can be. |
 | `matter` | yes | Whether Matter controllers see the device. Required, so an old config fails loudly instead of dropping devices from Matter. |
 | `aliases` | no | Other names the MCP tools accept |
-| `printer` | no | See [Printers](#printers). On/off types only. |
-| `kind` | no | Free-text description, e.g. "light switch"; defaults from the type |
 | `topics`, `options` | | Per device type, below |
 
 A device's id and name may not match another device's id, name or alias. Two devices may share an alias, and the
@@ -122,7 +120,7 @@ Optional topics:
 
 ## Printers
 
-`printer = true` marks a plug that powers a 3D printer, which may be in the middle of a print:
+`kind = "printer"` marks a plug that powers a 3D printer, which may be in the middle of a print:
 
 - **In Matter it's on-only.** A phone or hub can turn it on, but every Matter "off" (Off, Toggle, OffWithEffect, timed
   off) is ignored and it stays reported as on. "Turn off everything" from a phone can't cut a print. The bridge still

@@ -247,7 +247,7 @@ async function bootstrap(): Promise<void> {
         for (const device of config.devices) {
             console.log(`  [${device.name}]`);
             console.log(`    Type: ${device.type}`);
-            console.log(`    Id: ${device.id}, room: ${device.room}${device.printer ? ", printer" : ""}`);
+            console.log(`    Id: ${device.id}, room: ${device.room}, kind: ${device.kind}`);
 
             if (!device.matter) {
                 // Not in Matter: the bridge still keeps its state for the MCP tools
@@ -375,7 +375,7 @@ async function bootstrap(): Promise<void> {
         console.log(`\n${config.devices.length} devices are now available:\n`);
 
         config.devices.forEach((device, idx) => {
-            const exposure = device.matter ? (device.printer ? "Matter, on-only" : "Matter") : "MCP only";
+            const exposure = device.matter ? (device.kind === "printer" ? "Matter, on-only" : "Matter") : "MCP only";
             console.log(`  ${idx + 1}. ${device.name} (${device.type}; ${exposure})`);
         });
 

@@ -18,6 +18,7 @@ import {
     parseJsonObject,
 } from "./metadata.js";
 import { BridgedDevice } from "./BridgedDevice.js";
+import type { DeviceKind } from "../../types/config.js";
 import { onControllerChange } from "./matterEvents.js";
 
 /**
@@ -27,7 +28,7 @@ export interface OnOffDeviceConfig {
     type: "OnOffPlugInUnitDevice" | "OnOffLightDevice";
     name: string;
     /** Printers are on-only in Matter; switching them off needs a person's confirmation */
-    printer?: boolean;
+    kind?: DeviceKind;
     topics: {
         getOnline: string;
         getOn: string;
@@ -175,7 +176,7 @@ export class OnOffDevice extends BridgedDevice<OnOffDeviceConfig> {
     protected handleMatterOnOffChange(value: boolean): void {
         // The on-only server already ignores "off" for printers. This is the second guard,
         // in case some other path ever changes the attribute.
-        if (!value && this.config.printer) {
+        if (!value && this.config.kind === "printer") {
             console.warn(`[${this.config.name}] Not forwarding a Matter "off" for a printer`);
             return;
         }
@@ -267,11 +268,11 @@ export class OnOffDevice extends BridgedDevice<OnOffDeviceConfig> {
             // Return a factory function that takes the config
             return (config: OnOffDeviceConfig) => {
                 if (config.type === "OnOffPlugInUnitDevice") {
-                    return config.printer
+                    return config.kind === "printer"
                         ? OnOffPlugInUnitDevice.with(BridgedDeviceBasicInformationServer, OnOnlyPlugOnOffServer as any)
                         : OnOffPlugInUnitDevice.with(BridgedDeviceBasicInformationServer);
                 } else {
-                    return config.printer
+                    return config.kind === "printer"
                         ? OnOffLightDevice.with(BridgedDeviceBasicInformationServer, OnOnlyLightOnOffServer as any)
                         : OnOffLightDevice.with(BridgedDeviceBasicInformationServer);
                 }

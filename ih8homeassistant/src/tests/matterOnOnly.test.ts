@@ -24,7 +24,7 @@ function plugConfig(name: string, printer: boolean): OnOffDeviceConfig {
     return {
         type: "OnOffPlugInUnitDevice",
         name,
-        printer,
+        kind: printer ? "printer" : "light",
         topics: { getOnline: `tele/${topic}/LWT`, getOn: `stat/${topic}/POWER`, setOn: `cmnd/${topic}/POWER` },
         options: { onValue: "ON", offValue: "OFF", onlineValue: "Online", offlineValue: "Offline" },
     };

@@ -337,7 +337,9 @@ describe("House", () => {
                 assert.deepEqual(byId.get("tv")?.inputs, ["HDMI1", "HDMI2", "HDMI3", "HDMI4"]);
                 assert.deepEqual(byId.get("blup")?.can, ["bubble"]);
                 assert.equal(byId.get("tv")?.source, "last sent");
-                assert.equal(byId.get("trident")?.printer, true);
+                assert.equal(byId.get("trident")?.kind, "printer");
+                assert.equal(byId.get("reading_lamp")?.kind, "light");
+                assert.ok(!("printer" in byId.get("trident")!));
                 assert.equal(byId.get("cooler")?.matter, false);
                 assert.equal(byId.get("v0")?.online, null);
                 assert.equal(byId.get("v0")?.state.on, null);

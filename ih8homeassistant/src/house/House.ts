@@ -10,7 +10,7 @@
  *   never an assumed state
  */
 
-import type { DeviceConfig } from "../types/config.js";
+import type { DeviceConfig, DeviceKind } from "../types/config.js";
 import type { MqttClient } from "../mqtt/MqttClient.js";
 import type { BaseDeviceInterface, DeviceCapability, DeviceState } from "../mqtt/devices/metadata.js";
 import { HouseError, NameIndex } from "./names.js";
@@ -65,8 +65,7 @@ export interface DeviceInfo {
     name: string;
     aliases: string[];
     room: string;
-    kind: string;
-    printer: boolean;
+    kind: DeviceKind;
     matter: boolean;
     /** The tools that work on this device */
     can: string[];
@@ -176,7 +175,7 @@ export class House {
         }
         return selection.ids
             .map(id => this.devices.get(id)!)
-            .filter(device => device.config.printer && device.bridge.capabilities.has("onoff"))
+            .filter(device => device.config.kind === "printer" && device.bridge.capabilities.has("onoff"))
             .filter(device => device.bridge.state.online !== false && !isReported(device.bridge.state, false));
     }
 
@@ -401,7 +400,7 @@ export class House {
             const { config, bridge } = device;
             const { state } = bridge;
 
-            if (config.printer && !options.includePrinters) {
+            if (config.kind === "printer" && !options.includePrinters) {
                 result.printers_skipped.push({ id: config.id, state: onOff(state.on), online: state.online });
                 continue;
             }
@@ -414,7 +413,7 @@ export class House {
                 result.already.push({ id: config.id, state: target });
                 continue;
             }
-            if (config.printer && !on && !options.confirmedPrinters?.has(config.id)) {
+            if (config.kind === "printer" && !on && !options.confirmedPrinters?.has(config.id)) {
                 result.refused.push({
                     id: config.id,
                     reason: options.refusalReason ?? "switching off a printer needs a person's confirmation",
@@ -513,7 +512,6 @@ export class House {
             aliases: [...config.aliases],
             room: config.room,
             kind: config.kind,
-            printer: config.printer,
             matter: config.matter,
             can: [...can],
             ...(bridge.inputs ? { inputs: [...bridge.inputs] } : {}),

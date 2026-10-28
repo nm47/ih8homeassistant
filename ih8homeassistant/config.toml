@@ -15,17 +15,17 @@ token = ""   # set to require "Authorization: Bearer <token>"
 #   id      stable name for the MCP tools
 #   room    room-wide commands switch everything in it except printers
 #   aliases other names the MCP tools accept
-#   printer on-only in Matter; switching off needs a person's confirmation
+#   kind    what it is to a person, not its hardware: light, tv, printer, notifier or cooler.
+#           Printers are on-only in Matter, and switching one off needs a person's confirmation.
 #   matter  whether Matter controllers see it. The Matter endpoint ID comes from the name,
 #           so renaming a Matter device makes phones and hubs see a new device.
-#   kind    free-text description
 
 [[devices]]
 type    = "OnOffPlugInUnitDevice"
 name    = "Den Light"
 id      = "den_light"
 room    = "den"
-kind    = "light switch"
+kind    = "light"
 matter  = true
 
 [devices.topics]
@@ -39,7 +39,7 @@ type    = "OnOffPlugInUnitDevice"
 name    = "Dining Room Light"
 id      = "dining_room_light"
 room    = "dining room"
-kind    = "light switch"
+kind    = "light"
 matter  = true
 
 [devices.topics]
@@ -54,7 +54,7 @@ name    = "Closet Light"
 id      = "closet_light"
 room    = "bedroom"
 aliases = ["closet"]
-kind    = "light switch"
+kind    = "light"
 matter  = true
 
 [devices.topics]
@@ -69,7 +69,7 @@ name    = "Nudge"
 id      = "nudge"
 room    = "living room"
 aliases = ["nudge lamp"]
-kind    = "lamp with color and brightness"
+kind    = "light"
 matter  = true
 
 [devices.topics]
@@ -93,7 +93,7 @@ type    = "OnOffLightDevice"
 name    = "Living Room Light"
 id      = "living_room_light"
 room    = "living room"
-kind    = "light switch"
+kind    = "light"
 matter  = true
 
 [devices.topics]
@@ -108,7 +108,7 @@ name    = "Lanterns"
 id      = "lanterns"
 room    = "living room"
 aliases = ["lantern"]
-kind    = "plug"
+kind    = "light"
 matter  = true
 
 [devices.topics]
@@ -123,7 +123,7 @@ name    = "Reading Lamp"
 id      = "reading_lamp"
 room    = "den"
 aliases = ["reading light"]
-kind    = "plug, a lamp"
+kind    = "light"
 matter  = true
 
 [devices.topics]
@@ -138,7 +138,7 @@ name    = "blup"
 id      = "blup"
 room    = "den"
 aliases = ["bubbles", "bubble machine"]
-kind    = "notifier that blows bubbles"
+kind    = "notifier"
 matter  = true
 
 [devices.topics]
@@ -157,7 +157,7 @@ name    = "TV"
 id      = "tv"
 room    = "den"
 aliases = ["television", "den tv"]
-kind    = "TV over HDMI-CEC"
+kind    = "tv"
 matter  = true
 
 [devices.topics]
@@ -179,8 +179,7 @@ name    = "Trident"
 id      = "trident"
 room    = "den"
 aliases = ["printer", "3d printer", "voron trident"]
-kind    = "plug for the Voron Trident 3D printer"
-printer = true
+kind    = "printer"
 matter  = true
 
 [devices.topics]
@@ -196,8 +195,7 @@ name    = "V0"
 id      = "v0"
 room    = "den"
 aliases = ["voron v0"]
-kind    = "plug for the Voron V0 3D printer"
-printer = true
+kind    = "printer"
 matter  = true
 
 [devices.topics]
@@ -212,7 +210,7 @@ name    = "Bedroom Overhead"
 id      = "bedroom_overhead"
 room    = "bedroom"
 aliases = ["bedroom light", "bedroom fan"]
-kind    = "light switch"
+kind    = "light"
 matter  = false
 
 [devices.topics]
@@ -226,7 +224,7 @@ type    = "OnOffPlugInUnitDevice"
 name    = "Cooler"
 id      = "cooler"
 room    = "bedroom"
-kind    = "plug"
+kind    = "cooler"
 matter  = false
 
 [devices.topics]

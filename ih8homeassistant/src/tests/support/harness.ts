@@ -24,6 +24,7 @@ port = 1
 type = "OnOffPlugInUnitDevice"
 name = "Den Light"
 id = "den_light"
+kind = "light"
 room = "den"
 matter = true
 topics = { getOnline = "tele/den_light/LWT", getOn = "stat/den_light/POWER", setOn = "cmnd/den_light/POWER", getState = "tele/den_light/STATE" }
@@ -32,6 +33,7 @@ topics = { getOnline = "tele/den_light/LWT", getOn = "stat/den_light/POWER", set
 type = "OnOffLightDevice"
 name = "Reading Lamp"
 id = "reading_lamp"
+kind = "light"
 room = "den"
 aliases = ["lamp", "reading light"]
 matter = true
@@ -41,6 +43,7 @@ topics = { getOnline = "tele/reading_lamp/LWT", getOn = "stat/reading_lamp/POWER
 type = "TVDevice"
 name = "TV"
 id = "tv"
+kind = "tv"
 room = "den"
 aliases = ["television"]
 matter = true
@@ -51,9 +54,9 @@ options = { inputs = ["HDMI1", "HDMI2", "HDMI3", "HDMI4"] }
 type = "OnOffPlugInUnitDevice"
 name = "Trident"
 id = "trident"
+kind = "printer"
 room = "den"
 aliases = ["printer"]
-printer = true
 matter = true
 topics = { getOnline = "tele/trident/LWT", getOn = "stat/trident/POWER", setOn = "cmnd/trident/POWER", getState = "tele/trident/STATE" }
 
@@ -61,8 +64,8 @@ topics = { getOnline = "tele/trident/LWT", getOn = "stat/trident/POWER", setOn =
 type = "OnOffPlugInUnitDevice"
 name = "V0"
 id = "v0"
+kind = "printer"
 room = "den"
-printer = true
 matter = true
 topics = { getOnline = "tele/v0/LWT", getOn = "stat/v0/POWER", setOn = "cmnd/v0/POWER", getState = "tele/v0/STATE" }
 
@@ -70,6 +73,7 @@ topics = { getOnline = "tele/v0/LWT", getOn = "stat/v0/POWER", setOn = "cmnd/v0/
 type = "GenericSwitchDevice"
 name = "blup"
 id = "blup"
+kind = "notifier"
 room = "den"
 aliases = ["bubbles"]
 matter = true
@@ -80,6 +84,7 @@ options = { onlineValue = "online", offlineValue = "offline", commandValue = "" 
 type = "OnOffLightDevice"
 name = "Living Room Light"
 id = "living_room_light"
+kind = "light"
 room = "living room"
 matter = true
 topics = { getOnline = "tele/living_room_light/LWT", getOn = "stat/living_room_light/POWER", setOn = "cmnd/living_room_light/POWER", getState = "tele/living_room_light/STATE" }
@@ -88,6 +93,7 @@ topics = { getOnline = "tele/living_room_light/LWT", getOn = "stat/living_room_l
 type = "OnOffLightDevice"
 name = "Lanterns"
 id = "lanterns"
+kind = "light"
 room = "living room"
 aliases = ["lamp"]
 matter = true
@@ -97,6 +103,7 @@ topics = { getOnline = "tele/lanterns/LWT", getOn = "stat/lanterns/POWER", setOn
 type = "ExtendedColorLightDevice"
 name = "Nudge"
 id = "nudge"
+kind = "light"
 room = "living room"
 matter = true
 topics = { getOnline = "nudge/status/online", getOn = "nudge/status/power", setOn = "nudge/command/power", getBrightness = "nudge/status/brightness", setBrightness = "nudge/command/brightness", getRGB = "nudge/status/color", setRGB = "nudge/command/color" }
@@ -106,6 +113,7 @@ options = { onlineValue = "online", hex = true, hexPrefix = "#" }
 type = "OnOffPlugInUnitDevice"
 name = "Cooler"
 id = "cooler"
+kind = "cooler"
 room = "bedroom"
 matter = false
 topics = { getOnline = "tele/cooler/LWT", getOn = "stat/cooler/POWER", setOn = "cmnd/cooler/POWER", getState = "tele/cooler/STATE" }

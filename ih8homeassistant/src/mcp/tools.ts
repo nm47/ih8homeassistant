@@ -93,9 +93,10 @@ export class HouseMcp {
             "list_devices",
             {
                 description:
-                    "List every device: id, name, aliases, room, kind, which tools work on it, whether it is " +
-                    "online, its state, and where the state came from (\"reported\" by the device, or " +
-                    "\"last sent\" for the TV, which cannot be queried). null means not known yet.",
+                    "List every device: id, name, aliases, room, kind (light, tv, printer, notifier or cooler), " +
+                    "which tools work on it, whether it is online, its state, and where the state came from " +
+                    "(\"reported\" by the device, or \"last sent\" for the TV, which cannot be queried). " +
+                    "null means not known yet.",
                 inputSchema: z.object({}),
                 annotations: { readOnlyHint: true },
             },

@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import { parse } from "toml";
 import type { BridgeConfig, BrokerConfig, DeviceConfig, McpConfig } from "../types/config.js";
-import { DEFAULT_MCP_SETTINGS, DEFAULT_MQTT_SETTINGS } from "../types/config.js";
+import { DEFAULT_MCP_SETTINGS, DEFAULT_MQTT_SETTINGS, DEVICE_KINDS } from "../types/config.js";
 import { DeviceRegistry } from "../mqtt/devices/registry.js";
 import { normalizeName } from "../house/names.js";
 
@@ -11,18 +11,8 @@ import "../mqtt/devices/index.js";
 /** Device ids are what the MCP tools and logs show, so keep them plain */
 const DEVICE_ID_PATTERN = /^[a-z0-9_]+$/;
 
-/** Device types whose on/off a printer flag can restrict */
+/** Device types that can be printers: on-only in Matter, and switched off only with confirmation */
 const PRINTER_TYPES = new Set(["OnOffPlugInUnitDevice", "OnOffLightDevice"]);
-
-/** Default "kind" per device type, for entries that don't set one */
-const DEFAULT_KINDS: Record<string, string> = {
-    OnOffPlugInUnitDevice: "plug",
-    OnOffLightDevice: "light",
-    DimmableLightDevice: "dimmable light",
-    ExtendedColorLightDevice: "color light",
-    TVDevice: "TV",
-    GenericSwitchDevice: "button",
-};
 
 /**
  * Error thrown when configuration validation fails
@@ -289,24 +279,25 @@ export class ConfigParser {
             throw new ConfigValidationError(`devices[${index}] (${id}).matter must be true or false`);
         }
 
-        const printer = raw.printer ?? false;
-        if (typeof printer !== "boolean") {
-            throw new ConfigValidationError(`devices[${index}] (${id}).printer must be true or false`);
+        // Required rather than defaulted from the type: a printer's plug must never end up
+        // as some other kind, which would drop its protection
+        const kind = raw.kind;
+        if (typeof kind !== "string" || !(DEVICE_KINDS as readonly string[]).includes(kind)) {
+            throw new ConfigValidationError(`devices[${index}] (${id}).kind must be one of ${DEVICE_KINDS.join(", ")}`);
         }
-        if (printer && !PRINTER_TYPES.has(type)) {
+        if (kind === "printer" && !PRINTER_TYPES.has(type)) {
             throw new ConfigValidationError(
-                `devices[${index}] (${id}).printer is only supported for ${[...PRINTER_TYPES].join(", ")}`
+                `devices[${index}] (${id}).kind "printer" is only supported for ${[...PRINTER_TYPES].join(", ")}`
             );
+        }
+        // A config from before kind took over must fail rather than leave a printer unprotected
+        if ("printer" in raw) {
+            throw new ConfigValidationError(`devices[${index}] (${id}).printer was removed; set kind = "printer" instead`);
         }
 
         const aliases = raw.aliases ?? [];
         if (!Array.isArray(aliases) || !aliases.every(alias => typeof alias === "string" && normalizeName(alias).length > 0)) {
             throw new ConfigValidationError(`devices[${index}] (${id}).aliases must be a list of non-empty strings`);
-        }
-
-        const kind = raw.kind ?? DEFAULT_KINDS[type] ?? type;
-        if (typeof kind !== "string" || kind.length === 0) {
-            throw new ConfigValidationError(`devices[${index}] (${id}).kind must be a non-empty string`);
         }
 
         // Build device config object.
@@ -318,7 +309,6 @@ export class ConfigParser {
             id,
             room,
             aliases,
-            printer,
             matter,
             kind,
             topics: raw.topics ?? {},

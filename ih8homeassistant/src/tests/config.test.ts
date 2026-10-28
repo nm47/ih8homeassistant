@@ -57,8 +57,22 @@ describe("the live config", () => {
         assert.equal(byId.get("cooler")?.matter, false);
     });
 
-    it("marks exactly the Trident and the V0 as printers", () => {
-        assert.deepEqual(config.devices.filter(device => device.printer).map(device => device.id), ["trident", "v0"]);
+    it("gives every device the kind the ticket lists for it", () => {
+        assert.deepEqual(Object.fromEntries(config.devices.map(device => [device.id, device.kind])), {
+            den_light: "light",
+            dining_room_light: "light",
+            closet_light: "light",
+            nudge: "light",
+            living_room_light: "light",
+            lanterns: "light",
+            reading_lamp: "light",
+            blup: "notifier",
+            tv: "tv",
+            trident: "printer",
+            v0: "printer",
+            bedroom_overhead: "light",
+            cooler: "cooler",
+        });
     });
 
     it("puts the closet in the bedroom and the TV and V0 in the den", () => {
@@ -83,6 +97,7 @@ type = "OnOffPlugInUnitDevice"
 name = "${name}"
 id = "${id}"
 room = "den"
+kind = "light"
 ${fields}
 topics = { getOnline = "tele/${id}/LWT", getOn = "stat/${id}/POWER", setOn = "cmnd/${id}/POWER" }
 `;
@@ -94,10 +109,20 @@ topics = { getOnline = "tele/${id}/LWT", getOn = "stat/${id}/POWER", setOn = "cm
 
     it("accepts a minimal device and fills in the defaults", () => {
         const [parsed] = parse(device("matter = false")).devices;
-        assert.deepEqual(
-            { aliases: parsed.aliases, printer: parsed.printer, kind: parsed.kind },
-            { aliases: [], printer: false, kind: "plug" }
+        assert.deepEqual({ aliases: parsed.aliases, kind: parsed.kind }, { aliases: [], kind: "light" });
+    });
+
+    it("requires a kind from the fixed set, so a printer can't fall back to another kind", () => {
+        const withoutKind = device("matter = true").replace(`kind = "light"\n`, "");
+        assert.throws(() => parse(withoutKind), /kind must be one of light, tv, printer, notifier, cooler/);
+        assert.throws(
+            () => parse(device("matter = true").replace(`kind = "light"`, `kind = "plug"`)),
+            /kind must be one of/
         );
+    });
+
+    it("rejects the old printer flag, so an old config fails instead of losing printer safety", () => {
+        assert.throws(() => parse(device("matter = true\nprinter = true")), /printer was removed; set kind = "printer"/);
     });
 
     it("requires matter, so an old config can't silently drop devices from Matter", () => {
@@ -137,7 +162,7 @@ topics = { getOnline = "tele/${id}/LWT", getOn = "stat/${id}/POWER", setOn = "cm
         assert.equal(config.devices.length, 2);
     });
 
-    it("only allows printer on on/off devices", () => {
+    it("only allows kind printer on on/off devices", () => {
         assert.throws(
             () => ConfigParser.parse(BROKER + `
 [[devices]]
@@ -145,11 +170,11 @@ type = "GenericSwitchDevice"
 name = "Button"
 id = "button"
 room = "den"
+kind = "printer"
 matter = false
-printer = true
 topics = { getOnline = "button/online", setCommand = "button/press" }
 `),
-            /printer is only supported for/
+            /kind "printer" is only supported for/
         );
     });
 
