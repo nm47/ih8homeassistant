@@ -12,10 +12,16 @@ import "@matter/main/platform";
 import { CommissioningServer, Endpoint, Environment, ServerNode, StorageService, VendorId } from "@matter/main";
 import { AggregatorEndpoint } from "@matter/main/endpoints/aggregator";
 import { ConfigParser } from "./config/ConfigParser.js";
+import { assertUniqueDevices, createEndpointId } from "./config/deviceIds.js";
 import { MqttClient } from "./mqtt/MqttClient.js";
 import { DeviceFactory } from "./mqtt/devices/DeviceFactory.js";
 import { DeviceRegistry } from "./mqtt/devices/registry.js";
 import type { BaseDeviceInterface } from "./mqtt/devices/metadata.js";
+import { House } from "./house/House.js";
+import type { HouseDevice } from "./house/House.js";
+import { HouseMcp } from "./mcp/tools.js";
+import { startMcpHttpServer } from "./mcp/http.js";
+import type { McpHttpServer } from "./mcp/http.js";
 import { join } from "path";
 import { existsSync } from "fs";
 
@@ -30,42 +36,6 @@ const COMMISSIONING_KEEPALIVE_MS = 10 * 60 * 1000;
  * Docker's default stop_grace_period is 10s, so this must fire first to be of any use.
  */
 const SHUTDOWN_DEADLINE_MS = 8000;
-
-/**
- * Create a sanitized endpoint ID from device name
- */
-function createEndpointId(deviceName: string): string {
-    return deviceName.toLowerCase().replace(/\s+/g, "-");
-}
-
-/**
- * Reject configurations whose devices would collide at runtime
- *
- * createEndpointId lowercases and hyphenates, so "Living Room" and "living-room" produce the
- * same endpoint, and the bridge map is keyed by name, so duplicates would silently overwrite
- * each other.
- */
-function assertUniqueDevices(devices: Array<{ name: string }>): void {
-    const namesSeen = new Map<string, string>();
-    const idsSeen = new Map<string, string>();
-
-    for (const device of devices) {
-        const previousName = namesSeen.get(device.name);
-        if (previousName !== undefined) {
-            throw new Error(`Duplicate device name: "${device.name}" is used more than once`);
-        }
-        namesSeen.set(device.name, device.name);
-
-        const endpointId = createEndpointId(device.name);
-        const previousId = idsSeen.get(endpointId);
-        if (previousId !== undefined) {
-            throw new Error(
-                `Devices "${previousId}" and "${device.name}" both map to endpoint ID "${endpointId}"`
-            );
-        }
-        idsSeen.set(endpointId, device.name);
-    }
-}
 
 /**
  * Commissioning behavior that can re-open the pairing window quietly
@@ -190,7 +160,7 @@ async function bootstrap(): Promise<void> {
         const config = ConfigParser.loadFromFile(configPath);
         console.log(`Loaded ${config.devices.length} device(s) from configuration\n`);
 
-        assertUniqueDevices(config.devices);
+        assertUniqueDevices(config.devices.filter(device => device.matter));
 
         // Set up Matter environment and storage
         const environment = Environment.default;
@@ -261,18 +231,34 @@ async function bootstrap(): Promise<void> {
 
         // Initialize MQTT client
         console.log("Initializing MQTT client...");
-        const mqttClient = new MqttClient(config.broker);
+        const readOnly = process.env.IH8_MQTT_READ_ONLY === "1";
+        if (readOnly) {
+            console.warn("IH8_MQTT_READ_ONLY=1: every MQTT publish will be refused\n");
+        }
+        const mqttClient = new MqttClient(config.broker, { readOnly });
 
         // Add all devices from configuration
-        console.log(`Adding ${config.devices.length} bridged devices:\n`);
+        console.log(`Adding ${config.devices.length} devices:\n`);
 
-        // Track device bridges for MQTT message routing
+        // Track device bridges for MQTT message routing, keyed by device id
         const deviceBridges = new Map<string, BaseDeviceInterface>();
+        const houseDevices: HouseDevice[] = [];
 
         for (const device of config.devices) {
-            const endpointId = createEndpointId(device.name);
             console.log(`  [${device.name}]`);
             console.log(`    Type: ${device.type}`);
+            console.log(`    Id: ${device.id}, room: ${device.room}${device.printer ? ", printer" : ""}`);
+
+            if (!device.matter) {
+                // Not in Matter: the bridge still keeps its state for the MCP tools
+                const deviceBridge = DeviceFactory.createDevice(device, null, mqttClient);
+                deviceBridges.set(device.id, deviceBridge);
+                houseDevices.push({ config: device, bridge: deviceBridge });
+                console.log(`    Matter: not exposed\n`);
+                continue;
+            }
+
+            const endpointId = createEndpointId(device.name);
             console.log(`    Endpoint ID: ${endpointId}`);
 
             // Get device metadata
@@ -298,7 +284,8 @@ async function bootstrap(): Promise<void> {
 
             // Create device bridge for MQTT/Matter integration
             const deviceBridge = DeviceFactory.createDevice(device, endpoint, mqttClient);
-            deviceBridges.set(device.name, deviceBridge);
+            deviceBridges.set(device.id, deviceBridge);
+            houseDevices.push({ config: device, bridge: deviceBridge });
 
             // Set up identify event handlers
             endpoint.events.identify.startIdentifying.on(() => {
@@ -327,11 +314,22 @@ async function bootstrap(): Promise<void> {
             if (connected) {
                 return;
             }
-            console.warn("MQTT broker unavailable - marking all devices unreachable");
+            console.warn("MQTT broker unavailable - marking all devices unreachable and their state unknown");
             for (const bridge of deviceBridges.values()) {
-                bridge.setReachable(false);
+                bridge.handleBrokerLost();
             }
         });
+
+        // The MCP tools share the device bridges, and so their live state. Started before
+        // the broker wait, so a broker outage gets "broker unavailable" answers rather than
+        // no server. A failure here must not take Matter down with it.
+        const house = new House(houseDevices, mqttClient, config.mcp.confirmTimeoutMs);
+        let mcpServer: McpHttpServer | null = null;
+        try {
+            mcpServer = await startMcpHttpServer(new HouseMcp(house), config.mcp);
+        } catch (error) {
+            console.error("Failed to start the MCP server; continuing without it:", error);
+        }
 
         // Connect to the MQTT broker. This retries indefinitely and resolves on the first
         // successful connection, so a broker that is down at startup delays device
@@ -354,6 +352,7 @@ async function bootstrap(): Promise<void> {
         // even while the broker is unreachable
         installShutdownHandlers(async () => {
             clearInterval(commissioningKeepAlive);
+            await mcpServer?.close();
             for (const bridge of deviceBridges.values()) {
                 await bridge.close();
             }
@@ -376,7 +375,8 @@ async function bootstrap(): Promise<void> {
         console.log(`\n${config.devices.length} devices are now available:\n`);
 
         config.devices.forEach((device, idx) => {
-            console.log(`  ${idx + 1}. ${device.name} (${device.type})`);
+            const exposure = device.matter ? (device.printer ? "Matter, on-only" : "Matter") : "MCP only";
+            console.log(`  ${idx + 1}. ${device.name} (${device.type}; ${exposure})`);
         });
 
         console.log("\nNext steps:");

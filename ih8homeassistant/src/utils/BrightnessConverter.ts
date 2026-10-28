@@ -62,3 +62,19 @@ export function parseBrightness(payload: string): number | null {
 
     return brightness;
 }
+
+/**
+ * Convert MQTT brightness (0-255) to percent (0-100), the scale the MCP tools use
+ */
+export function mqttBrightnessToPercent(mqttBrightness: number): number {
+    const clamped = Math.max(0, Math.min(MQTT_MAX_BRIGHTNESS, mqttBrightness));
+    return Math.round((clamped * 100) / MQTT_MAX_BRIGHTNESS);
+}
+
+/**
+ * Convert percent (0-100) to MQTT brightness (0-255)
+ */
+export function percentToMqttBrightness(percent: number): number {
+    const clamped = Math.max(0, Math.min(100, percent));
+    return Math.round((clamped * MQTT_MAX_BRIGHTNESS) / 100);
+}

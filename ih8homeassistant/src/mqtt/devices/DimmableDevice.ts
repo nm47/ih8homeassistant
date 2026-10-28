@@ -3,14 +3,12 @@
  * Supports: DimmableLightDevice
  */
 
-import type { Endpoint } from "@matter/main";
 import { DimmableLightDevice } from "@matter/main/devices/dimmable-light";
 import { BridgedDeviceBasicInformationServer } from "@matter/main/behaviors/bridged-device-basic-information";
-import type { MqttClient } from "../MqttClient.js";
 import type {
-    BaseDeviceInterface,
     DeviceMetadata,
     EndpointConfiguration,
+    LightSettings,
     ValidationResult,
 } from "./metadata.js";
 import {
@@ -18,10 +16,13 @@ import {
     validateDeviceConfig,
     matchToken,
 } from "./metadata.js";
+import { BridgedDevice } from "./BridgedDevice.js";
 import { onControllerChange } from "./matterEvents.js";
 import {
     mqttToMatterBrightness,
     matterToMqttBrightness,
+    mqttBrightnessToPercent,
+    percentToMqttBrightness,
     parseBrightness,
 } from "../../utils/BrightnessConverter.js";
 
@@ -49,12 +50,10 @@ export interface DimmableDeviceConfig {
 /**
  * Dimmable device implementation
  */
-export class DimmableDevice implements BaseDeviceInterface {
-    constructor(
-        public readonly config: DimmableDeviceConfig,
-        public readonly endpoint: Endpoint,
-        public readonly mqttClient: MqttClient
-    ) {}
+export class DimmableDevice extends BridgedDevice<DimmableDeviceConfig> {
+    protected metadata(): DeviceMetadata {
+        return DimmableDevice.metadata;
+    }
 
     /**
      * Initialize device: subscribe to topics and setup handlers
@@ -66,7 +65,9 @@ export class DimmableDevice implements BaseDeviceInterface {
             this.config.topics.getBrightness,
         ];
         await this.mqttClient.subscribe(topics);
-        this.setupMatterEventHandlers();
+        if (this.endpoint) {
+            this.setupMatterEventHandlers();
+        }
         console.log(`[${this.config.name}] DimmableDevice initialized`);
     }
 
@@ -86,48 +87,6 @@ export class DimmableDevice implements BaseDeviceInterface {
     }
 
     /**
-     * Handle device availability updates
-     */
-    protected handleAvailability(message: string): void {
-        const isOnline = matchToken(
-            message,
-            this.config.options.onlineValue,
-            this.config.options.offlineValue
-        );
-
-        if (isOnline === null) {
-            console.warn(`[${this.config.name}] Ignoring unrecognized availability value: ${message}`);
-            return;
-        }
-
-        this.setReachable(isOnline);
-    }
-
-    /**
-     * Set the endpoint's reachable flag
-     */
-    setReachable(reachable: boolean): void {
-        console.log(`[${this.config.name}] Availability: ${reachable ? "online" : "offline"}`);
-
-        this.endpoint
-            .set({
-                bridgedDeviceBasicInformation: {
-                    reachable,
-                },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update reachable status:`, error);
-            });
-    }
-
-    /**
-     * Release any timers held by this device
-     */
-    close(): void {
-        // No timers to release
-    }
-
-    /**
      * Handle on/off state updates from MQTT
      */
     protected handleOnOffState(message: string): void {
@@ -140,15 +99,8 @@ export class DimmableDevice implements BaseDeviceInterface {
 
         console.log(`[${this.config.name}] MQTT state: ${isOn ? "ON" : "OFF"}`);
 
-        this.endpoint
-            .set({
-                onOff: {
-                    onOff: isOn,
-                },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update on/off state:`, error);
-            });
+        this.report({ on: isOn });
+        this.updateEndpoint({ onOff: { onOff: isOn } }, "on/off state");
     }
 
     /**
@@ -163,23 +115,41 @@ export class DimmableDevice implements BaseDeviceInterface {
 
         console.log(`[${this.config.name}] MQTT brightness: ${brightness}`);
 
-        const matterLevel = mqttToMatterBrightness(brightness);
-        this.endpoint
-            .set({
-                levelControl: {
-                    currentLevel: matterLevel,
-                },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update brightness:`, error);
-            });
+        this.report({ brightness: mqttBrightnessToPercent(brightness) });
+        this.updateEndpoint(
+            { levelControl: { currentLevel: mqttToMatterBrightness(brightness) } },
+            "brightness"
+        );
+    }
+
+    /**
+     * Publish an on/off command
+     */
+    async setOn(on: boolean): Promise<void> {
+        const payload = on ? this.config.options.onValue : this.config.options.offValue;
+        await this.mqttClient.publish(this.config.topics.setOn, payload);
+    }
+
+    /**
+     * Publish a brightness; this device has no color
+     */
+    async setLight(settings: LightSettings): Promise<void> {
+        if (settings.color !== undefined) {
+            throw new Error(`${this.config.name} has no color control`);
+        }
+        if (settings.brightness !== undefined) {
+            await this.mqttClient.publish(
+                this.config.topics.setBrightness,
+                percentToMqttBrightness(settings.brightness).toString()
+            );
+        }
     }
 
     /**
      * Setup Matter event handlers
      */
     protected setupMatterEventHandlers(): void {
-        const events = this.endpoint.events as any;
+        const events = this.endpoint!.events as any;
 
         // Controller-originated only, so state applied from MQTT above is not echoed back as
         // an MQTT command.
@@ -196,11 +166,10 @@ export class DimmableDevice implements BaseDeviceInterface {
      * Handle Matter on/off state change
      */
     protected handleMatterOnOffChange(value: boolean): void {
-        const mqttPayload = value ? this.config.options.onValue : this.config.options.offValue;
         console.log(`[${this.config.name}] Matter state changed to: ${value ? "ON" : "OFF"}`);
-        this.mqttClient
-            .publish(this.config.topics.setOn, mqttPayload)
-            .catch((error) => console.error(`[${this.config.name}] Failed to publish on/off:`, error));
+        this.setOn(value).catch((error) =>
+            console.error(`[${this.config.name}] Failed to publish on/off:`, error)
+        );
     }
 
     /**

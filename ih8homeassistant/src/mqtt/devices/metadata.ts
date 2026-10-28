@@ -21,9 +21,9 @@ export interface TopicSchema {
  */
 export interface OptionDefinition {
     /** TypeScript type of the option */
-    type: "string" | "number" | "boolean";
+    type: "string" | "number" | "boolean" | "string[]";
     /** Default value if not provided */
-    default: string | number | boolean;
+    default: string | number | boolean | string[];
     /** Description of what this option does */
     description?: string;
 }
@@ -46,15 +46,68 @@ export interface EndpointConfiguration {
 }
 
 /**
+ * Where a device's state came from
+ *
+ * - `reported`: the device's own report, e.g. Tasmota's stat/tele topics
+ * - `last sent`: an echo of the last command, for devices that cannot be queried (the TV
+ *   over HDMI-CEC)
+ */
+export type StateSource = "reported" | "last sent";
+
+/**
+ * Live state of a device, kept whether or not Matter sees it
+ *
+ * `null` means "not known yet": nothing has been heard since startup or since the broker
+ * connection was last lost. Nothing is ever assumed.
+ */
+export interface DeviceState {
+    online: boolean | null;
+    on: boolean | null;
+    /** Brightness in percent (0-100); dimmable and color devices only */
+    brightness?: number | null;
+    /** Color as "#rrggbb"; color devices only */
+    color?: string | null;
+    /** Selected input; TVs only */
+    input?: string | null;
+    source: StateSource;
+    /** When the last state report arrived */
+    reportedAt: Date | null;
+}
+
+/**
+ * Called after every state report (not availability changes) a device receives
+ */
+export type ReportListener = (state: Readonly<DeviceState>) => void;
+
+/**
+ * Light settings a caller can request; omitted fields are left alone
+ */
+export interface LightSettings {
+    /** Percent, 0-100 */
+    brightness?: number;
+    /** "#rrggbb" */
+    color?: string;
+}
+
+/**
  * Base interface all devices must implement
+ *
+ * The command methods are optional and present only on devices that support them. Matter
+ * and the MCP tools both switch devices through them, so there is one publish path.
  */
 export interface BaseDeviceInterface {
     /** Device configuration */
     readonly config: any;
-    /** Matter endpoint */
-    readonly endpoint: Endpoint;
+    /** Matter endpoint, or null for devices Matter does not see */
+    readonly endpoint: Endpoint | null;
     /** MQTT client */
     readonly mqttClient: MqttClient;
+    /** Live state, updated from MQTT */
+    readonly state: Readonly<DeviceState>;
+    /** What this particular device can do, which may depend on its configuration */
+    readonly capabilities: ReadonlySet<DeviceCapability>;
+    /** Inputs a TV accepts; TVs with an input topic only */
+    readonly inputs?: readonly string[];
 
     /** Initialize the device: subscribe to topics and setup handlers */
     initialize(): Promise<void>;
@@ -62,13 +115,31 @@ export interface BaseDeviceInterface {
     /** Handle incoming MQTT message */
     handleMqttMessage(topic: string, payload: Buffer): void;
 
-    /**
-     * Set the endpoint's reachable flag.
-     *
-     * Called both from the device's own availability topic and by the bridge when the MQTT
-     * broker connection drops, so stale values do not linger in the controller.
-     */
+    /** Set the reachable flag from the device's own availability topic */
     setReachable(reachable: boolean): void;
+
+    /**
+     * Forget everything heard over MQTT, because the broker connection dropped.
+     *
+     * Marks the endpoint unreachable so stale values do not linger in the controller, and
+     * resets the state to unknown: changes made while disconnected were never seen.
+     */
+    handleBrokerLost(): void;
+
+    /** Subscribe to state reports. Returns the unsubscribe function. */
+    onReport(listener: ReportListener): () => void;
+
+    /** Publish an on/off command */
+    setOn?(on: boolean): Promise<void>;
+
+    /** Publish brightness and/or color */
+    setLight?(settings: LightSettings): Promise<void>;
+
+    /** Publish an input selection */
+    setInput?(input: string): Promise<void>;
+
+    /** Publish a button press */
+    press?(): Promise<void>;
 
     /** Release any timers the device holds. Called during shutdown. */
     close(): void | Promise<void>;
@@ -78,7 +149,7 @@ export interface BaseDeviceInterface {
  * Constructor type for device classes
  */
 export interface DeviceConstructor {
-    new (config: any, endpoint: Endpoint, mqttClient: MqttClient): BaseDeviceInterface;
+    new (config: any, endpoint: Endpoint | null, mqttClient: MqttClient): BaseDeviceInterface;
     metadata: DeviceMetadata;
 }
 
@@ -90,6 +161,7 @@ export type DeviceCapability =
     | "onoff"         // On/off state
     | "dimming"       // Brightness/level control
     | "color"         // RGB/HSV color control
+    | "input"         // Input selection (TV)
     | "switch";       // Momentary switch/button
 
 /**
@@ -225,6 +297,13 @@ export function validateTopics(
         }
     }
 
+    for (const topicKey of schema.optional) {
+        const topic = topics[topicKey];
+        if (topic !== undefined && (typeof topic !== "string" || topic.trim().length === 0)) {
+            errors.push(`[${deviceName}] Optional topic ${topicKey} must be a non-empty string when set`);
+        }
+    }
+
     return errors;
 }
 
@@ -242,6 +321,12 @@ export function validateOptions(
     for (const [key, definition] of Object.entries(schema)) {
         const value = options[key];
         if (value === undefined) {
+            continue;
+        }
+        if (definition.type === "string[]") {
+            if (!Array.isArray(value) || !value.every(item => typeof item === "string")) {
+                errors.push(`[${deviceName}] Option ${key} must be an array of strings`);
+            }
             continue;
         }
         if (typeof value !== definition.type) {
@@ -301,11 +386,29 @@ export function applyOptionDefaults(
 
     for (const [key, definition] of Object.entries(schema)) {
         if (options[key] === undefined) {
-            options[key] = definition.default;
+            // Copied, so one device mutating its list could never change another's default
+            options[key] = Array.isArray(definition.default) ? [...definition.default] : definition.default;
         }
     }
 
     return options;
+}
+
+/**
+ * Parse a JSON object payload, such as Tasmota's tele/<topic>/STATE
+ *
+ * Returns null for anything that is not a JSON object, so callers can log and ignore it.
+ */
+export function parseJsonObject(message: string): Record<string, unknown> | null {
+    try {
+        const parsed: unknown = JSON.parse(message);
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+            return parsed as Record<string, unknown>;
+        }
+    } catch {
+        // Not JSON
+    }
+    return null;
 }
 
 /**

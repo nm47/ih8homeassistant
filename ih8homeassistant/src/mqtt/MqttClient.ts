@@ -14,6 +14,14 @@ export interface MqttConnectionHandler {
     (connected: boolean): void;
 }
 
+export interface MqttClientOptions {
+    /**
+     * Refuse every publish. For running a second bridge against the live broker, e.g. to
+     * check the MCP tools read real states, without any way to switch a device.
+     */
+    readOnly?: boolean;
+}
+
 export class MqttClient {
     private client: MqttClientType | null = null;
     private messageHandlers: Set<MqttMessageHandler> = new Set();
@@ -43,8 +51,10 @@ export class MqttClient {
     private readonly maxReconnectDelay: number;
     private readonly connectTimeout: number;
     private readonly qos: 0 | 1 | 2;
+    private readonly readOnly: boolean;
 
-    constructor(private readonly config: BrokerConfig) {
+    constructor(private readonly config: BrokerConfig, options: MqttClientOptions = {}) {
+        this.readOnly = options.readOnly ?? false;
         // Use config values or fall back to defaults
         this.warnAfterAttempts = config.maxReconnectAttempts ?? DEFAULT_MQTT_SETTINGS.maxReconnectAttempts;
         this.baseReconnectDelay = config.baseReconnectDelay ?? DEFAULT_MQTT_SETTINGS.baseReconnectDelay;
@@ -241,6 +251,10 @@ export class MqttClient {
      */
     async publish(topic: string, payload: string | Buffer): Promise<void> {
         return new Promise((resolve, reject) => {
+            if (this.readOnly) {
+                reject(new Error(`Read-only mode: not publishing to ${topic}`));
+                return;
+            }
             if (!this.client || !this.client.connected) {
                 reject(new Error("MQTT client not connected"));
                 return;

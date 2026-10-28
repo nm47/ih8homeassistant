@@ -10,12 +10,9 @@
  * existing config.toml files, even though the endpoint is no longer a Matter Generic Switch.
  */
 
-import type { Endpoint } from "@matter/main";
 import { OnOffPlugInUnitDevice } from "@matter/main/devices/on-off-plug-in-unit";
 import { BridgedDeviceBasicInformationServer } from "@matter/main/behaviors/bridged-device-basic-information";
-import type { MqttClient } from "../MqttClient.js";
 import type {
-    BaseDeviceInterface,
     DeviceMetadata,
     EndpointConfiguration,
     ValidationResult,
@@ -23,8 +20,8 @@ import type {
 import {
     createValidationResult,
     validateDeviceConfig,
-    matchToken,
 } from "./metadata.js";
+import { BridgedDevice } from "./BridgedDevice.js";
 import { onControllerChange } from "./matterEvents.js";
 
 /** How long the endpoint stays "on" after a press before reverting. */
@@ -50,14 +47,12 @@ export interface ButtonDeviceConfig {
 /**
  * Button device implementation
  */
-export class ButtonDevice implements BaseDeviceInterface {
+export class ButtonDevice extends BridgedDevice<ButtonDeviceConfig> {
     private revertTimeout: NodeJS.Timeout | null = null;
 
-    constructor(
-        public readonly config: ButtonDeviceConfig,
-        public readonly endpoint: Endpoint,
-        public readonly mqttClient: MqttClient
-    ) {}
+    protected metadata(): DeviceMetadata {
+        return ButtonDevice.metadata;
+    }
 
     /**
      * Initialize device: subscribe to topics and setup handlers
@@ -65,7 +60,9 @@ export class ButtonDevice implements BaseDeviceInterface {
     async initialize(): Promise<void> {
         const topics = [this.config.topics.getOnline];
         await this.mqttClient.subscribe(topics);
-        this.setupMatterEventHandlers();
+        if (this.endpoint) {
+            this.setupMatterEventHandlers();
+        }
         console.log(`[${this.config.name}] ButtonDevice initialized`);
     }
 
@@ -81,44 +78,16 @@ export class ButtonDevice implements BaseDeviceInterface {
     }
 
     /**
-     * Handle device availability updates
+     * Publish the configured command
      */
-    protected handleAvailability(message: string): void {
-        const isOnline = matchToken(
-            message,
-            this.config.options.onlineValue,
-            this.config.options.offlineValue
-        );
-
-        if (isOnline === null) {
-            console.warn(`[${this.config.name}] Ignoring unrecognized availability value: ${message}`);
-            return;
-        }
-
-        this.setReachable(isOnline);
-    }
-
-    /**
-     * Set the endpoint's reachable flag
-     */
-    setReachable(reachable: boolean): void {
-        console.log(`[${this.config.name}] Availability: ${reachable ? "online" : "offline"}`);
-
-        this.endpoint
-            .set({
-                bridgedDeviceBasicInformation: {
-                    reachable,
-                },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update reachable status:`, error);
-            });
+    async press(): Promise<void> {
+        await this.mqttClient.publish(this.config.topics.setCommand, this.config.options.commandValue);
     }
 
     /**
      * Release the pending revert timer
      */
-    close(): void {
+    override close(): void {
         if (this.revertTimeout) {
             clearTimeout(this.revertTimeout);
             this.revertTimeout = null;
@@ -132,7 +101,7 @@ export class ButtonDevice implements BaseDeviceInterface {
      * back as a second press.
      */
     protected setupMatterEventHandlers(): void {
-        const events = this.endpoint.events as any;
+        const events = this.endpoint!.events as any;
 
         onControllerChange<boolean>(events.onOff?.onOff$Changed, value => {
             if (value) {
@@ -147,10 +116,9 @@ export class ButtonDevice implements BaseDeviceInterface {
     protected handleMatterButtonPress(): void {
         console.log(`[${this.config.name}] Button pressed`);
 
-        const payload = this.config.options.commandValue;
-        this.mqttClient
-            .publish(this.config.topics.setCommand, payload)
-            .catch((error) => console.error(`[${this.config.name}] Failed to publish command:`, error));
+        this.press().catch((error) =>
+            console.error(`[${this.config.name}] Failed to publish command:`, error)
+        );
 
         if (this.revertTimeout) {
             clearTimeout(this.revertTimeout);
@@ -159,15 +127,7 @@ export class ButtonDevice implements BaseDeviceInterface {
         this.revertTimeout = setTimeout(() => {
             this.revertTimeout = null;
             // Offline write, so this does not register as another press
-            this.endpoint
-                .set({
-                    onOff: {
-                        onOff: false,
-                    },
-                } as any)
-                .catch((error) => {
-                    console.error(`[${this.config.name}] Failed to reset button state:`, error);
-                });
+            this.updateEndpoint({ onOff: { onOff: false } }, "button state");
         }, PULSE_REVERT_MS);
     }
 

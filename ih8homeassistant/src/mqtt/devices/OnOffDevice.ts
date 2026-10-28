@@ -3,13 +3,10 @@
  * Supports: OnOffPlugInUnitDevice, OnOffLightDevice
  */
 
-import type { Endpoint } from "@matter/main";
-import { OnOffPlugInUnitDevice } from "@matter/main/devices/on-off-plug-in-unit";
-import { OnOffLightDevice } from "@matter/main/devices/on-off-light";
+import { OnOffPlugInUnitDevice, OnOffPlugInUnitRequirements } from "@matter/main/devices/on-off-plug-in-unit";
+import { OnOffLightDevice, OnOffLightRequirements } from "@matter/main/devices/on-off-light";
 import { BridgedDeviceBasicInformationServer } from "@matter/main/behaviors/bridged-device-basic-information";
-import type { MqttClient } from "../MqttClient.js";
 import type {
-    BaseDeviceInterface,
     DeviceMetadata,
     EndpointConfiguration,
     ValidationResult,
@@ -18,7 +15,9 @@ import {
     createValidationResult,
     validateDeviceConfig,
     matchToken,
+    parseJsonObject,
 } from "./metadata.js";
+import { BridgedDevice } from "./BridgedDevice.js";
 import { onControllerChange } from "./matterEvents.js";
 
 /**
@@ -27,10 +26,14 @@ import { onControllerChange } from "./matterEvents.js";
 export interface OnOffDeviceConfig {
     type: "OnOffPlugInUnitDevice" | "OnOffLightDevice";
     name: string;
+    /** Printers are on-only in Matter; switching them off needs a person's confirmation */
+    printer?: boolean;
     topics: {
         getOnline: string;
         getOn: string;
         setOn: string;
+        /** Periodic JSON report with a POWER field, e.g. Tasmota's tele/<topic>/STATE */
+        getState?: string;
     };
     options: {
         onValue: string;
@@ -41,22 +44,47 @@ export interface OnOffDeviceConfig {
 }
 
 /**
+ * Make an OnOff server that ignores every Matter "off"
+ *
+ * matter.js routes Off, Toggle-while-on, OffWithEffect and the timed-off paths through
+ * off(), so overriding it covers them all. The attribute never changes, so the controller
+ * keeps seeing the printer on. Offline writes from MQTT bypass off(), so a printer switched
+ * off through MCP still shows as off.
+ */
+function onOnly<T extends new (...args: any[]) => { off(): unknown; endpoint: { id: string } }>(Base: T) {
+    class OnOnlyOnOffServer extends Base {
+        override off(): void {
+            console.warn(
+                `[${this.endpoint.id}] Ignoring Matter "off": printers switch off only through MCP, with a person's confirmation`
+            );
+        }
+    }
+    return OnOnlyOnOffServer;
+}
+
+const OnOnlyPlugOnOffServer = onOnly(OnOffPlugInUnitRequirements.OnOffServer as any);
+const OnOnlyLightOnOffServer = onOnly(OnOffLightRequirements.OnOffServer as any);
+
+/**
  * OnOff device implementation
  */
-export class OnOffDevice implements BaseDeviceInterface {
-    constructor(
-        public readonly config: OnOffDeviceConfig,
-        public readonly endpoint: Endpoint,
-        public readonly mqttClient: MqttClient
-    ) {}
+export class OnOffDevice extends BridgedDevice<OnOffDeviceConfig> {
+    protected metadata(): DeviceMetadata {
+        return OnOffDevice.metadata;
+    }
 
     /**
      * Initialize device: subscribe to topics and setup handlers
      */
     async initialize(): Promise<void> {
         const topics = [this.config.topics.getOnline, this.config.topics.getOn];
+        if (this.config.topics.getState) {
+            topics.push(this.config.topics.getState);
+        }
         await this.mqttClient.subscribe(topics);
-        this.setupMatterEventHandlers();
+        if (this.endpoint) {
+            this.setupMatterEventHandlers();
+        }
         console.log(`[${this.config.name}] OnOffDevice initialized`);
     }
 
@@ -70,49 +98,9 @@ export class OnOffDevice implements BaseDeviceInterface {
             this.handleAvailability(message);
         } else if (topic === this.config.topics.getOn) {
             this.handleOnOffState(message);
+        } else if (topic === this.config.topics.getState) {
+            this.handleStateReport(message);
         }
-    }
-
-    /**
-     * Handle device availability updates
-     */
-    protected handleAvailability(message: string): void {
-        const isOnline = matchToken(
-            message,
-            this.config.options.onlineValue,
-            this.config.options.offlineValue
-        );
-
-        if (isOnline === null) {
-            console.warn(`[${this.config.name}] Ignoring unrecognized availability value: ${message}`);
-            return;
-        }
-
-        this.setReachable(isOnline);
-    }
-
-    /**
-     * Set the endpoint's reachable flag
-     */
-    setReachable(reachable: boolean): void {
-        console.log(`[${this.config.name}] Availability: ${reachable ? "online" : "offline"}`);
-
-        this.endpoint
-            .set({
-                bridgedDeviceBasicInformation: {
-                    reachable,
-                },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update reachable status:`, error);
-            });
-    }
-
-    /**
-     * Release any timers held by this device
-     */
-    close(): void {
-        // No timers to release
     }
 
     /**
@@ -127,16 +115,45 @@ export class OnOffDevice implements BaseDeviceInterface {
         }
 
         console.log(`[${this.config.name}] MQTT state: ${isOn ? "ON" : "OFF"}`);
+        this.applyOnOff(isOn);
+    }
 
-        this.endpoint
-            .set({
-                onOff: {
-                    onOff: isOn,
-                },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update on/off state:`, error);
-            });
+    /**
+     * Handle a periodic JSON state report, taking only its POWER field
+     */
+    protected handleStateReport(message: string): void {
+        const state = parseJsonObject(message);
+        if (state === null) {
+            console.warn(`[${this.config.name}] Ignoring non-JSON state report: ${message}`);
+            return;
+        }
+        if (state.POWER === undefined) {
+            return;
+        }
+
+        const isOn = matchToken(String(state.POWER), this.config.options.onValue, this.config.options.offValue);
+        if (isOn === null) {
+            console.warn(`[${this.config.name}] Ignoring unrecognized POWER value: ${state.POWER}`);
+            return;
+        }
+
+        this.applyOnOff(isOn);
+    }
+
+    /**
+     * Record a reported on/off state and mirror it into Matter
+     */
+    private applyOnOff(isOn: boolean): void {
+        this.report({ on: isOn });
+        this.updateEndpoint({ onOff: { onOff: isOn } }, "on/off state");
+    }
+
+    /**
+     * Publish an on/off command
+     */
+    async setOn(on: boolean): Promise<void> {
+        const payload = on ? this.config.options.onValue : this.config.options.offValue;
+        await this.mqttClient.publish(this.config.topics.setOn, payload);
     }
 
     /**
@@ -146,7 +163,7 @@ export class OnOffDevice implements BaseDeviceInterface {
      * MQTT above is not immediately republished as an MQTT command.
      */
     protected setupMatterEventHandlers(): void {
-        const events = this.endpoint.events as any;
+        const events = this.endpoint!.events as any;
         onControllerChange<boolean>(events.onOff?.onOff$Changed, value =>
             this.handleMatterOnOffChange(value)
         );
@@ -156,11 +173,17 @@ export class OnOffDevice implements BaseDeviceInterface {
      * Handle Matter on/off state change
      */
     protected handleMatterOnOffChange(value: boolean): void {
-        const mqttPayload = value ? this.config.options.onValue : this.config.options.offValue;
+        // The on-only server already ignores "off" for printers. This is the second guard,
+        // in case some other path ever changes the attribute.
+        if (!value && this.config.printer) {
+            console.warn(`[${this.config.name}] Not forwarding a Matter "off" for a printer`);
+            return;
+        }
+
         console.log(`[${this.config.name}] Matter state changed to: ${value ? "ON" : "OFF"}`);
-        this.mqttClient
-            .publish(this.config.topics.setOn, mqttPayload)
-            .catch((error) => console.error(`[${this.config.name}] Failed to publish on/off:`, error));
+        this.setOn(value).catch((error) =>
+            console.error(`[${this.config.name}] Failed to publish on/off:`, error)
+        );
     }
 
     /**
@@ -173,7 +196,7 @@ export class OnOffDevice implements BaseDeviceInterface {
 
         topicSchema: {
             required: ["getOnline", "getOn", "setOn"],
-            optional: [],
+            optional: ["getState"],
         },
 
         optionSchema: {
@@ -217,6 +240,11 @@ export class OnOffDevice implements BaseDeviceInterface {
         },
 
         createEndpointConfig(config: OnOffDeviceConfig): EndpointConfiguration {
+            const topics = [config.topics.getOnline, config.topics.getOn];
+            if (config.topics.getState) {
+                topics.push(config.topics.getState);
+            }
+
             return {
                 state: {
                     bridgedDeviceBasicInformation: {
@@ -230,7 +258,7 @@ export class OnOffDevice implements BaseDeviceInterface {
                         onOff: true,
                     },
                 },
-                topics: [config.topics.getOnline, config.topics.getOn],
+                topics,
             };
         },
 
@@ -239,9 +267,13 @@ export class OnOffDevice implements BaseDeviceInterface {
             // Return a factory function that takes the config
             return (config: OnOffDeviceConfig) => {
                 if (config.type === "OnOffPlugInUnitDevice") {
-                    return OnOffPlugInUnitDevice.with(BridgedDeviceBasicInformationServer);
+                    return config.printer
+                        ? OnOffPlugInUnitDevice.with(BridgedDeviceBasicInformationServer, OnOnlyPlugOnOffServer as any)
+                        : OnOffPlugInUnitDevice.with(BridgedDeviceBasicInformationServer);
                 } else {
-                    return OnOffLightDevice.with(BridgedDeviceBasicInformationServer);
+                    return config.printer
+                        ? OnOffLightDevice.with(BridgedDeviceBasicInformationServer, OnOnlyLightOnOffServer as any)
+                        : OnOffLightDevice.with(BridgedDeviceBasicInformationServer);
                 }
             };
         },

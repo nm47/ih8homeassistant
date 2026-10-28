@@ -3,16 +3,14 @@
  * Supports: ExtendedColorLightDevice
  */
 
-import type { Endpoint } from "@matter/main";
 import { ExtendedColorLightDevice } from "@matter/main/devices/extended-color-light";
 import { BridgedDeviceBasicInformationServer } from "@matter/main/behaviors/bridged-device-basic-information";
 import { ColorControlServer } from "@matter/main/behaviors/color-control";
 import { ColorControl } from "@matter/main/clusters/color-control";
-import type { MqttClient } from "../MqttClient.js";
 import type {
-    BaseDeviceInterface,
     DeviceMetadata,
     EndpointConfiguration,
+    LightSettings,
     ValidationResult,
 } from "./metadata.js";
 import {
@@ -20,13 +18,23 @@ import {
     validateDeviceConfig,
     matchToken,
 } from "./metadata.js";
+import { BridgedDevice } from "./BridgedDevice.js";
 import { onControllerChange } from "./matterEvents.js";
 import {
     mqttToMatterBrightness,
     matterToMqttBrightness,
+    mqttBrightnessToPercent,
+    percentToMqttBrightness,
     parseBrightness,
 } from "../../utils/BrightnessConverter.js";
-import { hexToHsv, hsvToHex, xyToHex, miredsToHex } from "../../utils/ColorConverter.js";
+import {
+    parseRgbHex,
+    rgbToHex,
+    rgbToHsv,
+    hsvToHex,
+    xyToHex,
+    miredsToHex,
+} from "../../utils/ColorConverter.js";
 
 /** Collapse a burst of colour attribute changes into a single MQTT publish. */
 const PUBLISH_DEBOUNCE_MS = 50;
@@ -59,14 +67,12 @@ export interface ColorDeviceConfig {
 /**
  * Color device implementation
  */
-export class ColorDevice implements BaseDeviceInterface {
+export class ColorDevice extends BridgedDevice<ColorDeviceConfig> {
     private publishRgbTimeout: NodeJS.Timeout | null = null;
 
-    constructor(
-        public readonly config: ColorDeviceConfig,
-        public readonly endpoint: Endpoint,
-        public readonly mqttClient: MqttClient
-    ) {}
+    protected metadata(): DeviceMetadata {
+        return ColorDevice.metadata;
+    }
 
     /**
      * Initialize device: subscribe to topics and setup handlers
@@ -79,7 +85,9 @@ export class ColorDevice implements BaseDeviceInterface {
             this.config.topics.getRGB,
         ];
         await this.mqttClient.subscribe(topics);
-        this.setupMatterEventHandlers();
+        if (this.endpoint) {
+            this.setupMatterEventHandlers();
+        }
         console.log(`[${this.config.name}] ColorDevice initialized`);
     }
 
@@ -101,44 +109,9 @@ export class ColorDevice implements BaseDeviceInterface {
     }
 
     /**
-     * Handle device availability updates
-     */
-    protected handleAvailability(message: string): void {
-        const isOnline = matchToken(
-            message,
-            this.config.options.onlineValue,
-            this.config.options.offlineValue
-        );
-
-        if (isOnline === null) {
-            console.warn(`[${this.config.name}] Ignoring unrecognized availability value: ${message}`);
-            return;
-        }
-
-        this.setReachable(isOnline);
-    }
-
-    /**
-     * Set the endpoint's reachable flag
-     */
-    setReachable(reachable: boolean): void {
-        console.log(`[${this.config.name}] Availability: ${reachable ? "online" : "offline"}`);
-
-        this.endpoint
-            .set({
-                bridgedDeviceBasicInformation: {
-                    reachable,
-                },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update reachable status:`, error);
-            });
-    }
-
-    /**
      * Release the pending publish timer
      */
-    close(): void {
+    override close(): void {
         if (this.publishRgbTimeout) {
             clearTimeout(this.publishRgbTimeout);
             this.publishRgbTimeout = null;
@@ -158,15 +131,8 @@ export class ColorDevice implements BaseDeviceInterface {
 
         console.log(`[${this.config.name}] MQTT state: ${isOn ? "ON" : "OFF"}`);
 
-        this.endpoint
-            .set({
-                onOff: {
-                    onOff: isOn,
-                },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update on/off state:`, error);
-            });
+        this.report({ on: isOn });
+        this.updateEndpoint({ onOff: { onOff: isOn } }, "on/off state");
     }
 
     /**
@@ -181,16 +147,11 @@ export class ColorDevice implements BaseDeviceInterface {
 
         console.log(`[${this.config.name}] MQTT brightness: ${brightness}`);
 
-        const matterLevel = mqttToMatterBrightness(brightness);
-        this.endpoint
-            .set({
-                levelControl: {
-                    currentLevel: matterLevel,
-                },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update brightness:`, error);
-            });
+        this.report({ brightness: mqttBrightnessToPercent(brightness) });
+        this.updateEndpoint(
+            { levelControl: { currentLevel: mqttToMatterBrightness(brightness) } },
+            "brightness"
+        );
     }
 
     /**
@@ -207,25 +168,58 @@ export class ColorDevice implements BaseDeviceInterface {
         console.log(`[${this.config.name}] MQTT RGB: ${message}`);
 
         const prefix = this.config.options.hex ? this.config.options.hexPrefix : undefined;
-        const hsv = hexToHsv(message, prefix);
+        const rgb = parseRgbHex(message.trim(), prefix);
 
-        if (!hsv) {
+        if (!rgb) {
             console.error(`[${this.config.name}] Invalid RGB value: ${message}`);
             return;
         }
 
-        this.endpoint
-            .set({
+        const hsv = rgbToHsv(rgb);
+        this.report({ color: rgbToHex(rgb, "#") });
+        this.updateEndpoint(
+            {
                 colorControl: {
                     colorMode: ColorControl.ColorMode.CurrentHueAndCurrentSaturation,
                     enhancedColorMode: ColorControl.EnhancedColorMode.CurrentHueAndCurrentSaturation,
                     currentHue: hsv.hue,
                     currentSaturation: hsv.saturation,
                 },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update color:`, error);
-            });
+            },
+            "color"
+        );
+    }
+
+    /**
+     * Publish an on/off command
+     */
+    async setOn(on: boolean): Promise<void> {
+        const payload = on ? this.config.options.onValue : this.config.options.offValue;
+        await this.mqttClient.publish(this.config.topics.setOn, payload);
+    }
+
+    /**
+     * Publish brightness and/or color
+     *
+     * The color goes out as given, at full value: the device has its own brightness topic.
+     * Matter's path below differs, baking the Matter level into the RGB it publishes.
+     */
+    async setLight(settings: LightSettings): Promise<void> {
+        if (settings.brightness !== undefined) {
+            await this.mqttClient.publish(
+                this.config.topics.setBrightness,
+                percentToMqttBrightness(settings.brightness).toString()
+            );
+        }
+
+        if (settings.color !== undefined) {
+            const rgb = parseRgbHex(settings.color, "#");
+            if (!rgb) {
+                throw new Error(`Invalid color "${settings.color}": expected #rrggbb`);
+            }
+            const prefix = this.config.options.hex ? this.config.options.hexPrefix : undefined;
+            await this.mqttClient.publish(this.config.topics.setRGB, rgbToHex(rgb, prefix));
+        }
     }
 
     /**
@@ -236,7 +230,7 @@ export class ColorDevice implements BaseDeviceInterface {
      * path. All handlers are controller-originated only.
      */
     protected setupMatterEventHandlers(): void {
-        const events = this.endpoint.events as any;
+        const events = this.endpoint!.events as any;
 
         onControllerChange<boolean>(events.onOff?.onOff$Changed, value =>
             this.handleMatterOnOffChange(value)
@@ -266,11 +260,10 @@ export class ColorDevice implements BaseDeviceInterface {
      * Handle Matter on/off state change
      */
     protected handleMatterOnOffChange(value: boolean): void {
-        const mqttPayload = value ? this.config.options.onValue : this.config.options.offValue;
         console.log(`[${this.config.name}] Matter state changed to: ${value ? "ON" : "OFF"}`);
-        this.mqttClient
-            .publish(this.config.topics.setOn, mqttPayload)
-            .catch((error) => console.error(`[${this.config.name}] Failed to publish on/off:`, error));
+        this.setOn(value).catch((error) =>
+            console.error(`[${this.config.name}] Failed to publish on/off:`, error)
+        );
     }
 
     /**
@@ -313,7 +306,7 @@ export class ColorDevice implements BaseDeviceInterface {
         let level = 254;
 
         try {
-            const state = this.endpoint.state as any;
+            const state = this.endpoint!.state as any;
             colorControl = state?.colorControl;
             if (typeof state?.levelControl?.currentLevel === "number") {
                 level = state.levelControl.currentLevel;

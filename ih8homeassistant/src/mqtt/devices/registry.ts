@@ -70,7 +70,7 @@ class DeviceRegistry {
      */
     static createDevice(
         config: any,
-        endpoint: Endpoint,
+        endpoint: Endpoint | null,
         mqttClient: MqttClient
     ): BaseDeviceInterface {
         const typeName = config.type;

@@ -3,20 +3,20 @@
  * Currently uses OnOffPlugInUnitDevice pending BasicVideoPlayerDevice support in matter.js
  * Future: Will migrate to BasicVideoPlayerDevice when available
  *
- * Parses JSON STATE messages to extract POWER field for on/off state
+ * Parses JSON STATE messages for the POWER and INPUT fields. Over HDMI-CEC the TV cannot be
+ * queried, so STATE is an echo of the last command sent, and the state source says so.
  */
 
-import type { Endpoint } from "@matter/main";
 import { OnOffPlugInUnitDevice } from "@matter/main/devices/on-off-plug-in-unit";
 // Future import when BasicVideoPlayerDevice is available in matter.js:
 // import { BasicVideoPlayerDevice } from "@matter/main/devices/basic-video-player";
 import { BridgedDeviceBasicInformationServer } from "@matter/main/behaviors/bridged-device-basic-information";
 // Future import for MediaInput support:
 // import { MediaInputServer } from "@matter/main/behaviors/media-input";
-import type { MqttClient } from "../MqttClient.js";
 import type {
-    BaseDeviceInterface,
+    DeviceCapability,
     DeviceMetadata,
+    DeviceState,
     EndpointConfiguration,
     ValidationResult,
 } from "./metadata.js";
@@ -24,7 +24,9 @@ import {
     createValidationResult,
     validateDeviceConfig,
     matchToken,
+    parseJsonObject,
 } from "./metadata.js";
+import { BridgedDevice } from "./BridgedDevice.js";
 import { onControllerChange } from "./matterEvents.js";
 
 /**
@@ -35,31 +37,48 @@ export interface TVDeviceConfig {
     name: string;
     topics: {
         getOnline: string;      // e.g., "tele/tv/LWT"
-        getState: string;        // e.g., "tele/tv/STATE" (JSON with POWER field)
+        getState: string;        // e.g., "tele/tv/STATE" (JSON with POWER and INPUT fields)
         setPower: string;        // e.g., "cmnd/tv/POWER"
-        // Future expansion:
-        // getInput?: string;    // e.g., "tele/tv/STATE" (JSON with INPUT field)
-        // setInput?: string;    // e.g., "cmnd/tv/INPUT"
+        setInput?: string;       // e.g., "cmnd/tv/INPUT"
     };
     options: {
         onValue: string;         // "ON"
         offValue: string;        // "OFF"
         onlineValue: string;     // "Online"
         offlineValue: string;    // "Offline"
-        // Future expansion:
-        // supportedInputs?: string[];  // ["HDMI1", "HDMI2", "HDMI3"]
+        inputs: string[];        // ["HDMI1", "HDMI2", "HDMI3", "HDMI4"]
     };
 }
 
 /**
  * TV device implementation
  */
-export class TVDevice implements BaseDeviceInterface {
-    constructor(
-        public readonly config: TVDeviceConfig,
-        public readonly endpoint: Endpoint,
-        public readonly mqttClient: MqttClient
-    ) {}
+export class TVDevice extends BridgedDevice<TVDeviceConfig> {
+    protected metadata(): DeviceMetadata {
+        return TVDevice.metadata;
+    }
+
+    protected override unknownState(): DeviceState {
+        return { online: null, on: null, input: null, source: "last sent", reportedAt: null };
+    }
+
+    /**
+     * Input selection only counts once there is a topic to send it on
+     */
+    override get capabilities(): ReadonlySet<DeviceCapability> {
+        const capabilities = new Set(TVDevice.metadata.capabilities);
+        if (this.config.topics.setInput) {
+            capabilities.add("input");
+        }
+        return capabilities;
+    }
+
+    /**
+     * Inputs the TV accepts, when input selection is configured
+     */
+    get inputs(): readonly string[] | undefined {
+        return this.config.topics.setInput ? this.config.options.inputs : undefined;
+    }
 
     /**
      * Initialize device: subscribe to topics and setup handlers
@@ -67,7 +86,9 @@ export class TVDevice implements BaseDeviceInterface {
     async initialize(): Promise<void> {
         const topics = [this.config.topics.getOnline, this.config.topics.getState];
         await this.mqttClient.subscribe(topics);
-        this.setupMatterEventHandlers();
+        if (this.endpoint) {
+            this.setupMatterEventHandlers();
+        }
         console.log(`[${this.config.name}] TVDevice initialized`);
     }
 
@@ -85,96 +106,79 @@ export class TVDevice implements BaseDeviceInterface {
     }
 
     /**
-     * Handle device availability updates
-     */
-    protected handleAvailability(message: string): void {
-        const isOnline = matchToken(
-            message,
-            this.config.options.onlineValue,
-            this.config.options.offlineValue
-        );
-
-        if (isOnline === null) {
-            console.warn(`[${this.config.name}] Ignoring unrecognized availability value: ${message}`);
-            return;
-        }
-
-        this.setReachable(isOnline);
-    }
-
-    /**
-     * Set the endpoint's reachable flag
-     */
-    setReachable(reachable: boolean): void {
-        console.log(`[${this.config.name}] Availability: ${reachable ? "online" : "offline"}`);
-
-        this.endpoint
-            .set({
-                bridgedDeviceBasicInformation: {
-                    reachable,
-                },
-            } as any)
-            .catch((error) => {
-                console.error(`[${this.config.name}] Failed to update reachable status:`, error);
-            });
-    }
-
-    /**
-     * Release any timers held by this device
-     */
-    close(): void {
-        // No timers to release
-    }
-
-    /**
-     * Parse JSON STATE message and extract POWER field
+     * Parse JSON STATE message and extract the POWER and INPUT fields
      * Example: {"Time":"2025-12-24T17:42:22","Uptime":"0T00:00:00","POWER":"ON","INPUT":"HDMI3"}
      */
     protected handleStateUpdate(message: string): void {
-        try {
-            const state = JSON.parse(message);
-
-            // Extract POWER field
-            if (state.POWER !== undefined) {
-                const isOn = matchToken(
-                    String(state.POWER),
-                    this.config.options.onValue,
-                    this.config.options.offValue
-                );
-
-                if (isOn === null) {
-                    console.warn(`[${this.config.name}] Ignoring unrecognized POWER value: ${state.POWER}`);
-                    return;
-                }
-
-                console.log(`[${this.config.name}] MQTT power state from JSON: ${isOn ? "ON" : "OFF"}`);
-
-                this.endpoint
-                    .set({
-                        onOff: {
-                            onOff: isOn,
-                        },
-                    } as any)
-                    .catch((error) => {
-                        console.error(`[${this.config.name}] Failed to update on/off state:`, error);
-                    });
-            }
-
-            // Future: Extract INPUT field for media input cluster
-            // if (state.INPUT !== undefined) {
-            //     this.handleInputUpdate(state.INPUT);
-            // }
-
-        } catch (error) {
-            console.error(`[${this.config.name}] Failed to parse STATE JSON: ${message}`, error);
+        const state = parseJsonObject(message);
+        if (state === null) {
+            console.error(`[${this.config.name}] Failed to parse STATE JSON: ${message}`);
+            return;
         }
+
+        const changes: Partial<DeviceState> = {};
+
+        if (state.POWER !== undefined) {
+            const isOn = matchToken(
+                String(state.POWER),
+                this.config.options.onValue,
+                this.config.options.offValue
+            );
+
+            if (isOn === null) {
+                console.warn(`[${this.config.name}] Ignoring unrecognized POWER value: ${state.POWER}`);
+            } else {
+                console.log(`[${this.config.name}] MQTT power state from JSON: ${isOn ? "ON" : "OFF"}`);
+                changes.on = isOn;
+                this.updateEndpoint({ onOff: { onOff: isOn } }, "on/off state");
+            }
+        }
+
+        if (typeof state.INPUT === "string") {
+            changes.input = state.INPUT;
+        }
+
+        if (Object.keys(changes).length > 0) {
+            this.report(changes);
+        }
+    }
+
+    /**
+     * Publish a power command
+     */
+    async setOn(on: boolean): Promise<void> {
+        const payload = on ? this.config.options.onValue : this.config.options.offValue;
+        await this.mqttClient.publish(this.config.topics.setPower, payload);
+    }
+
+    /**
+     * Publish an input selection
+     *
+     * Matching is case-insensitive, but the configured spelling is what gets sent.
+     */
+    async setInput(input: string): Promise<void> {
+        const topic = this.config.topics.setInput;
+        if (!topic) {
+            throw new Error(`${this.config.name} has no input topic configured`);
+        }
+
+        const match = this.config.options.inputs.find(
+            candidate => candidate.toLowerCase() === input.trim().toLowerCase()
+        );
+        if (match === undefined) {
+            throw new Error(
+                `Unknown input "${input}" for ${this.config.name}. Valid inputs: ${this.config.options.inputs.join(", ")}`
+            );
+        }
+
+        await this.mqttClient.publish(topic, match);
     }
 
     /**
      * Setup Matter event handlers
      */
     protected setupMatterEventHandlers(): void {
-        const events = this.endpoint.events as any;
+        const events = this.endpoint!.events as any;
 
         // On/Off events (TV power control). Controller-originated only, so the state we just
         // applied from the STATE topic is not echoed back as a power command.
@@ -194,22 +198,17 @@ export class TVDevice implements BaseDeviceInterface {
      * Handle Matter power state change (from Google Home, etc.)
      */
     protected handleMatterPowerChange(value: boolean): void {
-        const mqttPayload = value ? this.config.options.onValue : this.config.options.offValue;
         console.log(`[${this.config.name}] Matter power state changed to: ${value ? "ON" : "OFF"}`);
-
-        this.mqttClient
-            .publish(this.config.topics.setPower, mqttPayload)
-            .catch((error) => console.error(`[${this.config.name}] Failed to publish power:`, error));
+        this.setOn(value).catch((error) =>
+            console.error(`[${this.config.name}] Failed to publish power:`, error)
+        );
     }
 
     // Future method for input selection when MediaInput cluster is available
     // protected handleMatterInputChange(inputIndex: number): void {
-    //     const inputName = this.config.options.supportedInputs?.[inputIndex];
-    //     if (inputName && this.config.topics.setInput) {
-    //         console.log(`[${this.config.name}] Matter input changed to index ${inputIndex}: ${inputName}`);
-    //         this.mqttClient
-    //             .publish(this.config.topics.setInput, inputName)
-    //             .catch((error) => console.error(`[${this.config.name}] Failed to publish input:`, error));
+    //     const inputName = this.config.options.inputs[inputIndex];
+    //     if (inputName) {
+    //         this.setInput(inputName).catch(...);
     //     }
     // }
 
@@ -219,12 +218,12 @@ export class TVDevice implements BaseDeviceInterface {
     static metadata: DeviceMetadata = {
         typeName: "TVDevice",
 
+        // "input" is added per device when a setInput topic is configured
         capabilities: new Set(["availability", "onoff"]),
-        // Future: new Set(["availability", "onoff", "mediainput"])
 
         topicSchema: {
             required: ["getOnline", "getState", "setPower"],
-            optional: [], // Future: ["getInput", "setInput"]
+            optional: ["setInput"],
         },
 
         optionSchema: {
@@ -248,12 +247,11 @@ export class TVDevice implements BaseDeviceInterface {
                 default: "Offline",
                 description: "Value representing 'offline' state",
             },
-            // Future option when MediaInput support is added:
-            // supportedInputs: {
-            //     type: "array",
-            //     default: [],
-            //     description: "List of supported input names (e.g., ['HDMI1', 'HDMI2', 'HDMI3'])",
-            // },
+            inputs: {
+                type: "string[]",
+                default: [],
+                description: "Input names the TV accepts on setInput (e.g., ['HDMI1', 'HDMI2'])",
+            },
         },
 
         validateConfig(config: any): ValidationResult {
@@ -263,12 +261,15 @@ export class TVDevice implements BaseDeviceInterface {
                 errors.push(`Invalid type for TVDevice: ${config.type}`);
             }
 
-            errors.push(
-                ...validateDeviceConfig(config, this.topicSchema, this.optionSchema, [
-                    ["onValue", "offValue"],
-                    ["onlineValue", "offlineValue"],
-                ]).errors
-            );
+            const result = validateDeviceConfig(config, this.topicSchema, this.optionSchema, [
+                ["onValue", "offValue"],
+                ["onlineValue", "offlineValue"],
+            ]);
+            errors.push(...result.errors);
+
+            if (result.valid && config.topics.setInput !== undefined && config.options.inputs.length === 0) {
+                errors.push(`[${config.name}] Option inputs must list the inputs setInput accepts`);
+            }
 
             return createValidationResult(errors);
         },
@@ -287,15 +288,6 @@ export class TVDevice implements BaseDeviceInterface {
                         onOff: false,  // Start with TV off
                     },
                     // Future: mediaInput cluster initialization when BasicVideoPlayerDevice is available
-                    // mediaInput: {
-                    //     inputList: config.options.supportedInputs?.map((name, index) => ({
-                    //         index,
-                    //         inputType: 3, // HDMI
-                    //         name,
-                    //         description: name,
-                    //     })) || [],
-                    //     currentInput: 0,
-                    // },
                 },
                 topics: [config.topics.getOnline, config.topics.getState],
             };
@@ -305,23 +297,10 @@ export class TVDevice implements BaseDeviceInterface {
             // Currently using OnOffPlugInUnitDevice as a temporary solution
             // Future: Replace with BasicVideoPlayerDevice when available in matter.js
             return () => OnOffPlugInUnitDevice.with(BridgedDeviceBasicInformationServer);
-
-            // Future implementation when BasicVideoPlayerDevice is exported:
-            // return () => BasicVideoPlayerDevice.with(
-            //     BridgedDeviceBasicInformationServer,
-            //     MediaInputServer,
-            //     // Additional TV-specific servers as needed
-            // );
         },
 
         getMatterBehaviors() {
             return [BridgedDeviceBasicInformationServer];
-
-            // Future: Add MediaInputServer and other TV-specific behaviors
-            // return [
-            //     BridgedDeviceBasicInformationServer,
-            //     MediaInputServer,
-            // ];
         },
     };
 }

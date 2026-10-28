@@ -14,11 +14,12 @@ import "./index.js";
 export class DeviceFactory {
     /**
      * Create the appropriate device bridge instance based on device type
+     * The endpoint is null for devices Matter does not see
      * Uses the DeviceRegistry for dynamic device lookup
      */
     static createDevice(
         config: any,
-        endpoint: Endpoint,
+        endpoint: Endpoint | null,
         mqttClient: MqttClient
     ): BaseDeviceInterface {
         return DeviceRegistry.createDevice(config, endpoint, mqttClient);

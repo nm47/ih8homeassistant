@@ -5,27 +5,72 @@ user = ""
 pass = ""
 qos  = 0
 
+# MCP tools for Sophie and Claude Code, at http://<host>:<port>/mcp
+[mcp]
+host  = "0.0.0.0"
+port  = 8540
+token = ""   # set to require "Authorization: Bearer <token>"
+
+# Every device in the house. Fields beyond type/name/topics/options:
+#   id      stable name for the MCP tools
+#   room    room-wide commands switch everything in it except printers
+#   aliases other names the MCP tools accept
+#   printer on-only in Matter; switching off needs a person's confirmation
+#   matter  whether Matter controllers see it. The Matter endpoint ID comes from the name,
+#           so renaming a Matter device makes phones and hubs see a new device.
+#   kind    free-text description
+
 [[devices]]
-type = "OnOffPlugInUnitDevice"
-name = "Den Light"
+type    = "OnOffPlugInUnitDevice"
+name    = "Den Light"
+id      = "den_light"
+room    = "den"
+kind    = "light switch"
+matter  = true
 
 [devices.topics]
-getOnline = "den_light/tele/LWT"
-getOn     = "den_light/stat/POWER"
-setOn     = "den_light/cmnd/POWER"
+getOnline = "tele/den_light/LWT"
+getOn     = "stat/den_light/POWER"
+setOn     = "cmnd/den_light/POWER"
+getState  = "tele/den_light/STATE"
 
 [[devices]]
-type = "OnOffLightDevice"
-name = "Closet Light"
+type    = "OnOffPlugInUnitDevice"
+name    = "Dining Room Light"
+id      = "dining_room_light"
+room    = "dining room"
+kind    = "light switch"
+matter  = true
 
 [devices.topics]
-getOnline = "closet_light/tele/LWT"
-getOn     = "closet_light/stat/POWER"
-setOn     = "closet_light/cmnd/POWER"
+getOnline = "tele/dining_room_light/LWT"
+getOn     = "stat/dining_room_light/POWER"
+setOn     = "cmnd/dining_room_light/POWER"
+getState  = "tele/dining_room_light/STATE"
 
 [[devices]]
-type = "ExtendedColorLightDevice"
-name = "Nudge"
+type    = "OnOffLightDevice"
+name    = "Closet Light"
+id      = "closet_light"
+room    = "bedroom"
+aliases = ["closet"]
+kind    = "light switch"
+matter  = true
+
+[devices.topics]
+getOnline = "tele/closet_light/LWT"
+getOn     = "stat/closet_light/POWER"
+setOn     = "cmnd/closet_light/POWER"
+getState  = "tele/closet_light/STATE"
+
+[[devices]]
+type    = "ExtendedColorLightDevice"
+name    = "Nudge"
+id      = "nudge"
+room    = "living room"
+aliases = ["nudge lamp"]
+kind    = "lamp with color and brightness"
+matter  = true
 
 [devices.topics]
 getOnline = "nudge/status/online"
@@ -44,26 +89,57 @@ hex       = true
 hexPrefix = "#"
 
 [[devices]]
-type = "OnOffLightDevice"
-name = "Living Room Light"
+type    = "OnOffLightDevice"
+name    = "Living Room Light"
+id      = "living_room_light"
+room    = "living room"
+kind    = "light switch"
+matter  = true
 
 [devices.topics]
-getOnline = "living_room_light/tele/LWT"
-getOn     = "living_room_light/stat/POWER"
-setOn     = "living_room_light/cmnd/POWER"
+getOnline = "tele/living_room_light/LWT"
+getOn     = "stat/living_room_light/POWER"
+setOn     = "cmnd/living_room_light/POWER"
+getState  = "tele/living_room_light/STATE"
 
 [[devices]]
-type = "OnOffLightDevice"
-name = "Reading Lamp"
+type    = "OnOffLightDevice"
+name    = "Lanterns"
+id      = "lanterns"
+room    = "living room"
+aliases = ["lantern"]
+kind    = "plug"
+matter  = true
 
 [devices.topics]
-getOnline = "reading_lamp/tele/LWT"
-getOn     = "reading_lamp/stat/POWER"
-setOn     = "reading_lamp/cmnd/POWER"
+getOnline = "tele/lanterns/LWT"
+getOn     = "stat/lanterns/POWER"
+setOn     = "cmnd/lanterns/POWER"
+getState  = "tele/lanterns/STATE"
 
 [[devices]]
-type = "GenericSwitchDevice"
-name = "blup"
+type    = "OnOffLightDevice"
+name    = "Reading Lamp"
+id      = "reading_lamp"
+room    = "den"
+aliases = ["reading light"]
+kind    = "plug, a lamp"
+matter  = true
+
+[devices.topics]
+getOnline = "tele/reading_lamp/LWT"
+getOn     = "stat/reading_lamp/POWER"
+setOn     = "cmnd/reading_lamp/POWER"
+getState  = "tele/reading_lamp/STATE"
+
+[[devices]]
+type    = "GenericSwitchDevice"
+name    = "blup"
+id      = "blup"
+room    = "den"
+aliases = ["bubbles", "bubble machine"]
+kind    = "notifier that blows bubbles"
+matter  = true
 
 [devices.topics]
 getOnline  = "blup/status/online"
@@ -74,17 +150,87 @@ onlineValue  = "online"
 offlineValue = "offline"
 commandValue = ""
 
+# Matter knew this as "Living Room TV"; renamed on 2026-10-28, so controllers see it as new
 [[devices]]
-type = "TVDevice"
-name = "Living Room TV"
+type    = "TVDevice"
+name    = "TV"
+id      = "tv"
+room    = "den"
+aliases = ["television", "den tv"]
+kind    = "TV over HDMI-CEC"
+matter  = true
 
 [devices.topics]
 getOnline = "tele/tv/LWT"
 getState  = "tele/tv/STATE"
 setPower  = "cmnd/tv/POWER"
+setInput  = "cmnd/tv/INPUT"
 
 [devices.options]
 onValue      = "ON"
 offValue     = "OFF"
 onlineValue  = "Online"
 offlineValue = "Offline"
+inputs       = ["HDMI1", "HDMI2", "HDMI3", "HDMI4"]
+
+[[devices]]
+type    = "OnOffPlugInUnitDevice"
+name    = "Trident"
+id      = "trident"
+room    = "den"
+aliases = ["printer", "3d printer", "voron trident"]
+kind    = "plug for the Voron Trident 3D printer"
+printer = true
+matter  = true
+
+[devices.topics]
+getOnline = "tele/trident/LWT"
+getOn     = "stat/trident/POWER"
+setOn     = "cmnd/trident/POWER"
+getState  = "tele/trident/STATE"
+
+# No plug answers on cmnd/v0/POWER until the V0 gets one again with the topic "v0"
+[[devices]]
+type    = "OnOffPlugInUnitDevice"
+name    = "V0"
+id      = "v0"
+room    = "den"
+aliases = ["voron v0"]
+kind    = "plug for the Voron V0 3D printer"
+printer = true
+matter  = true
+
+[devices.topics]
+getOnline = "tele/v0/LWT"
+getOn     = "stat/v0/POWER"
+setOn     = "cmnd/v0/POWER"
+getState  = "tele/v0/STATE"
+
+[[devices]]
+type    = "OnOffLightDevice"
+name    = "Bedroom Overhead"
+id      = "bedroom_overhead"
+room    = "bedroom"
+aliases = ["bedroom light", "bedroom fan"]
+kind    = "light switch"
+matter  = false
+
+[devices.topics]
+getOnline = "tele/bedroom_overhead/LWT"
+getOn     = "stat/bedroom_overhead/POWER"
+setOn     = "cmnd/bedroom_overhead/POWER"
+getState  = "tele/bedroom_overhead/STATE"
+
+[[devices]]
+type    = "OnOffPlugInUnitDevice"
+name    = "Cooler"
+id      = "cooler"
+room    = "bedroom"
+kind    = "plug"
+matter  = false
+
+[devices.topics]
+getOnline = "tele/cooler/LWT"
+getOn     = "stat/cooler/POWER"
+setOn     = "cmnd/cooler/POWER"
+getState  = "tele/cooler/STATE"

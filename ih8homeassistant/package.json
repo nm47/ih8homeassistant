@@ -24,11 +24,16 @@
     "dependencies": {
         "@matter/main": "0.15.6",
         "@matter/nodejs": "0.15.6",
+        "@modelcontextprotocol/node": "2.1.2",
+        "@modelcontextprotocol/server": "2.4.0",
         "mqtt": "^5.14.1",
-        "toml": "^3.0.0"
+        "toml": "^3.0.0",
+        "zod": "4.6.7"
     },
     "devDependencies": {
+        "@modelcontextprotocol/client": "2.4.0",
         "@types/node": "^20.0.0",
+        "aedes": "1.2.0",
         "typescript": "^5.0.0"
     },
     "engines": {

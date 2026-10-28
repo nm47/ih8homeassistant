@@ -4,7 +4,7 @@ This document demonstrates how easy it is to add a new device type to the bridge
 
 Adding a new device type requires modifying **2 files**:
 
-1. Create new device class file with metadata
+1. Create new device class file with metadata, extending `BridgedDevice`
 2. Register in `src/mqtt/devices/index.ts` (1 line)
 
 ## Example: Motion Sensor Device
@@ -16,21 +16,19 @@ Here's how you would add a motion sensor device:
 **File**: `src/mqtt/devices/MotionSensorDevice.ts`
 
 ```typescript
-import type { Endpoint } from "@matter/main";
 import { OccupancySensorDevice } from "@matter/main/devices/occupancy-sensor";
 import { BridgedDeviceBasicInformationServer } from "@matter/main/behaviors/bridged-device-basic-information";
-import type { MqttClient } from "../MqttClient.js";
 import type {
-    BaseDeviceInterface,
     DeviceMetadata,
     EndpointConfiguration,
     ValidationResult,
 } from "./metadata.js";
 import {
     createValidationResult,
-    validateTopics,
-    applyOptionDefaults,
+    validateDeviceConfig,
+    matchToken,
 } from "./metadata.js";
+import { BridgedDevice } from "./BridgedDevice.js";
 
 export interface MotionSensorDeviceConfig {
     type: "OccupancySensorDevice";
@@ -47,17 +45,20 @@ export interface MotionSensorDeviceConfig {
     };
 }
 
-export class MotionSensorDevice implements BaseDeviceInterface {
-    constructor(
-        public readonly config: MotionSensorDeviceConfig,
-        public readonly endpoint: Endpoint,
-        public readonly mqttClient: MqttClient
-    ) {}
+/**
+ * BridgedDevice handles availability, the live state the MCP tools read, and mirroring
+ * into Matter. The endpoint is null when the device's config says matter = false, so only
+ * touch it through updateEndpoint(), and only wire Matter handlers when it exists.
+ */
+export class MotionSensorDevice extends BridgedDevice<MotionSensorDeviceConfig> {
+    protected metadata(): DeviceMetadata {
+        return MotionSensorDevice.metadata;
+    }
 
     async initialize(): Promise<void> {
         const topics = [this.config.topics.getOnline, this.config.topics.getMotion];
         await this.mqttClient.subscribe(topics);
-        this.setupMatterEventHandlers();
+        // Motion sensors are read-only, so there are no Matter -> MQTT handlers to set up
         console.log(`[${this.config.name}] MotionSensorDevice initialized`);
     }
 
@@ -71,22 +72,20 @@ export class MotionSensorDevice implements BaseDeviceInterface {
         }
     }
 
-    protected handleAvailability(message: string): void {
-        const isOnline = message === this.config.options.onlineValue;
-        this.endpoint.set({
-            bridgedDeviceBasicInformation: { reachable: isOnline },
-        } as any);
-    }
-
     protected handleMotionState(message: string): void {
-        const motionDetected = message === this.config.options.motionDetectedValue;
-        this.endpoint.set({
-            occupancySensing: { occupancy: motionDetected ? 1 : 0 },
-        } as any);
-    }
+        const motionDetected = matchToken(
+            message,
+            this.config.options.motionDetectedValue,
+            this.config.options.noMotionValue
+        );
+        if (motionDetected === null) {
+            console.warn(`[${this.config.name}] Ignoring unrecognized motion value: ${message}`);
+            return;
+        }
 
-    protected setupMatterEventHandlers(): void {
-        // Motion sensors are typically read-only, so no Matter->MQTT events needed
+        // DeviceState has no motion field yet; add one to metadata.ts if the MCP tools
+        // should report it
+        this.updateEndpoint({ occupancySensing: { occupancy: motionDetected ? 1 : 0 } }, "occupancy");
     }
 
     static metadata: DeviceMetadata = {
@@ -107,12 +106,15 @@ export class MotionSensorDevice implements BaseDeviceInterface {
 
         validateConfig(config: any): ValidationResult {
             const errors: string[] = [];
-            if (!config.name) errors.push("Missing device name");
             if (config.type !== "OccupancySensorDevice") {
                 errors.push(`Invalid type: ${config.type}`);
             }
-            errors.push(...validateTopics(config, this.topicSchema, config.name || "unknown"));
-            config.options = applyOptionDefaults(config, this.optionSchema);
+            errors.push(
+                ...validateDeviceConfig(config, this.topicSchema, this.optionSchema, [
+                    ["onlineValue", "offlineValue"],
+                    ["motionDetectedValue", "noMotionValue"],
+                ]).errors
+            );
             return createValidationResult(errors);
         },
 
@@ -124,7 +126,7 @@ export class MotionSensorDevice implements BaseDeviceInterface {
                         productName: config.name,
                         productLabel: config.name,
                         serialNumber: `ih8-${config.name.toLowerCase().replace(/\s+/g, "-")}`,
-                        reachable: true,
+                        reachable: false,
                     },
                     occupancySensing: {
                         occupancy: 0,
@@ -161,10 +163,25 @@ DeviceRegistry.register("OccupancySensorDevice", MotionSensorDevice.metadata, Mo
 export { MotionSensorDevice } from "./MotionSensorDevice.js";
 ```
 
+### Step 3: Add it to the config
+
+`id`, `room` and `matter` are required on every device; see the README for all the fields.
+
 ```toml
 [[devices]]
 type = "OccupancySensorDevice"
 name = "Living Room Motion"
+id = "living_room_motion"
+room = "living room"
+matter = true
 topics = { getOnline = "motion/livingroom/LWT", getMotion = "motion/livingroom/state" }
 options = { motionDetectedValue = "motion", noMotionValue = "clear" }
 ```
+
+### MCP
+
+The device shows up in `list_devices` with its online state straight away. The MCP tools act through the optional
+command methods on `BaseDeviceInterface` (`setOn`, `setLight`, `setInput`, `press`) and the device's
+`capabilities`. A device that switches implements `setOn` and declares `"onoff"`, and `turn_on`/`turn_off` then
+work on it. A new kind of command needs a method there, a capability, and a tool in `src/mcp/tools.ts` backed by
+`src/house/House.ts`.
