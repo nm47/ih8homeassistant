@@ -288,6 +288,16 @@ describe("MCP tools", () => {
     }
 
     describe("dry run", () => {
+        for (const era of ["modern", "legacy"] as const) {
+            it(`names itself as the dry run, to a ${era} client`, async () => {
+                const { client: live } = await connect({ era });
+                const { client: dry } = await connect({ era, dryRun: true });
+
+                assert.equal(live.getServerVersion()?.name, "ih8homeassistant-house");
+                assert.equal(dry.getServerVersion()?.name, "ih8homeassistant-house (dry run)");
+            });
+        }
+
         it("serves the same tools and reads as /mcp", async () => {
             const { client: live } = await connect({ era: "modern" });
             const { client: dry } = await connect({ era: "modern", dryRun: true });

@@ -98,7 +98,8 @@ export class HouseMcp {
         const log = (message: string) => console.log(`[MCP${house.dryRun ? " dry run" : ""}] ${message}`);
 
         const server = new McpServer(
-            { name: "ih8homeassistant-house", version: "0.1.0" },
+            // A client can check the name before sending anything, to be sure which one it reached
+            { name: house.dryRun ? "ih8homeassistant-house (dry run)" : "ih8homeassistant-house", version: "0.1.0" },
             {
                 instructions:
                     "Controls the lights, plugs, TV and gadgets in this house. Use list_devices to see devices, " +
