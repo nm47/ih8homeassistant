@@ -57,7 +57,8 @@ token = ""          # optional; when set, clients must send "Authorization: Bear
 confirmTimeoutMs = 3000   # how long to wait for a device to confirm a command; the default
 ```
 
-The whole table is optional. The endpoint is `http://<host>:<port>/mcp`.
+The whole table is optional. The endpoint is `http://<host>:<port>/mcp`, and its [dry run](#dry-run) is
+`http://<host>:<port>/mcp/dry-run`.
 
 ### Devices
 
@@ -125,9 +126,10 @@ Optional topics:
 - **In Matter it's on-only.** A phone or hub can turn it on, but every Matter "off" (Off, Toggle, OffWithEffect, timed
   off) is ignored and it stays reported as on. "Turn off everything" from a phone can't cut a print. The bridge still
   mirrors the real state from MQTT, so a printer switched off another way shows as off.
-- **Through MCP,** room-wide actions and `all_off` never include it. Switching off a named printer asks the person
-  through the client (MCP elicitation), and is refused if the client can't ask, the person declines, or nobody answers.
-  Turning one on needs no confirmation.
+- **Through MCP,** room-wide actions and `all_off` never include it; of the `kind` selections, only `printer` does.
+  Switching off a named printer, or one that `kind` `printer` chose, asks the person through the client (MCP
+  elicitation), and is refused if the client can't ask, the person declines, or nobody answers. Turning one on needs no
+  confirmation.
 
 ## MCP tools
 
@@ -135,8 +137,8 @@ Optional topics:
 |---|---|
 | `list_devices` | Every device: id, name, aliases, room, kind, which tools work on it, online, state, and where the state came from |
 | `get_state` | State of `devices`, a `room`, or everything |
-| `turn_on` / `turn_off` | Switch `devices` or a `room` (not both). A room skips printers. |
-| `all_off` | Switch off everything except printers |
+| `turn_on` / `turn_off` | Switch `devices`, or a `room` and/or a `kind` (not `devices` with either). `kind` alone means the whole house. A room or the whole house skips printers, unless `kind` is `printer`. `except` leaves devices alone. |
+| `all_off` | Switch off everything except printers, and except the devices in `except` |
 | `set_light` | Brightness (percent) and/or color (`#rrggbb` or a name like `red`, `warm white`), e.g. for Nudge |
 | `set_tv_input` | Switch the TV's input, e.g. `HDMI2` |
 | `bubble` | Make blüp blow bubbles |
@@ -149,6 +151,9 @@ The rules hold for every client:
   device's own report. Anything that doesn't report back is listed as sent but not confirmed. Switching results list
   what was switched, what was already that way (nothing sent), what wasn't confirmed, what was offline (skipped), and
   the printers a room or `all_off` left alone, with their state, so the client can offer to switch them off as well.
+  With `except`, they also list the devices it left alone.
+- **A selection `kind` or `except` narrows to nothing** is refused, and nothing is sent. Printers the selection would
+  leave alone don't count. So is an unknown name in `except`, and `except` without devices, a room or a kind.
 - **State** is `null` until the device has reported since the bridge started, or since the broker connection last
   dropped. The TV's source is `"last sent"`: over HDMI-CEC it can't be queried, so its state is the last command.
 - **Confirmations come from a person, not the model.** The question goes to the client as an MCP elicitation, and
@@ -157,6 +162,14 @@ The rules hold for every client:
 
 Clients on MCP protocol 2026-07-28 are served statelessly. 2025-era clients get a session each, because their
 confirmation is a server-to-client request that has to come back to the same server.
+
+### Dry run
+
+`/mcp/dry-run` serves the same tools with the same names and checks, and publishes nothing. Reads work as on `/mcp`.
+The switching tools return what they would have done in the live result's shape, with `"dry_run": true`: `switched`
+lists what would be sent, and the summary says "would switch". It asks no one about printers: they are `refused`, with
+the reason that a person would be asked. Errors are the same, word for word. The client picks the dry run by URL, so a
+model can't turn it off.
 
 ### Claude Code
 

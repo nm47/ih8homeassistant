@@ -4,10 +4,13 @@
  *
  * This is the layer the MCP tools sit on. It enforces the rules every client gets:
  * - names resolve exactly or fail with the candidates; nothing is sent for a bad request
- * - room-wide actions and all_off never include printers
+ * - room-wide and house-wide actions and all_off never include printers, unless the
+ *   request asks for kind printer
  * - a printer is switched off only when the caller passes a person's confirmation for it
  * - results report what the device confirmed, or say it was sent and not confirmed;
  *   never an assumed state
+ *
+ * A dry-run House runs the same rules on the same devices and publishes nothing.
  */
 
 import type { DeviceConfig, DeviceKind } from "../types/config.js";
@@ -29,6 +32,29 @@ export interface HouseDevice {
 export interface Selector {
     devices?: string[];
     room?: string;
+}
+
+/**
+ * What turn_on and turn_off act on: devices named explicitly, or a room's or the whole
+ * house's devices of one kind; either way less the devices in except
+ */
+export interface SwitchSelector extends Selector {
+    kind?: DeviceKind;
+    except?: string[];
+}
+
+/**
+ * A selector resolved to device ids
+ */
+interface Selection {
+    ids: string[];
+    /** Given as devices, which then must all switch */
+    named: boolean;
+    /** Named, or kind printer: printers are switched, with a person's confirmation to switch off */
+    includePrinters: boolean;
+    room?: string;
+    /** Devices except took out of the selection */
+    excepted?: string[];
 }
 
 /** The tool each capability makes available */
@@ -85,12 +111,18 @@ export interface DeviceInfo {
 
 type OnOff = "on" | "off";
 
+/** A device left alone, with its state */
+type LeftAlone = { id: string; state: OnOff | null; online: boolean | null };
+
 /**
  * Outcome of turn_on, turn_off and all_off
  */
 export interface SwitchResult {
     action: "turn_on" | "turn_off" | "all_off";
+    /** Only in a dry run: nothing was sent, and switched lists what would have been */
+    dry_run?: true;
     room?: string;
+    kind?: DeviceKind;
     /** Sent, and the device then reported the requested state */
     switched: Array<{ id: string; state: OnOff; source: DeviceState["source"] }>;
     /** Already reported in the requested state; nothing sent */
@@ -100,7 +132,9 @@ export interface SwitchResult {
     /** Skipped: the device's availability topic says it is offline */
     offline: string[];
     /** Printers a room-wide action or all_off left alone, with their state */
-    printers_skipped: Array<{ id: string; state: OnOff | null; online: boolean | null }>;
+    printers_skipped: LeftAlone[];
+    /** Only when except was given: the devices it left alone, with their state */
+    excepted?: LeftAlone[];
     /** Named printers not switched off, because no person confirmed it */
     refused: Array<{ id: string; reason: string }>;
     /** The publish itself failed */
@@ -113,6 +147,8 @@ export interface SwitchResult {
  */
 export interface CommandResult {
     id: string;
+    /** Only in a dry run: nothing was sent, so nothing is confirmed */
+    dry_run?: true;
     /** True when the device reported the requested values within the timeout */
     confirmed: boolean;
     /** The state after the wait, as reported; not what was requested */
@@ -134,14 +170,26 @@ export interface TurnOffOptions {
 export class House {
     private readonly devices: Map<string, HouseDevice>;
     private readonly names: NameIndex;
+    /** Publish nothing; switching calls return what they would have done */
+    readonly dryRun: boolean;
 
     constructor(
         devices: readonly HouseDevice[],
         private readonly mqttClient: MqttClient,
-        private readonly confirmTimeoutMs: number
+        private readonly confirmTimeoutMs: number,
+        options: { dryRun?: boolean } = {}
     ) {
         this.devices = new Map(devices.map(device => [device.config.id, device]));
         this.names = new NameIndex(devices.map(device => device.config));
+        this.dryRun = options.dryRun ?? false;
+    }
+
+    /**
+     * The same devices and rules as a dry run: every check runs as here, but switching
+     * calls publish nothing and return what they would have done, marked dry_run
+     */
+    asDryRun(): House {
+        return new House([...this.devices.values()], this.mqttClient, this.confirmTimeoutMs, { dryRun: true });
     }
 
     /**
@@ -162,15 +210,16 @@ export class House {
     }
 
     /**
-     * Printers among the named devices, which turn_off would need a person to confirm
+     * Printers among the named devices, or chosen by kind printer, which turn_off would
+     * need a person to confirm
      *
-     * Room selections never include printers, so this is empty for them. A printer that is
-     * offline or reported itself off gets nothing sent, so needs nothing confirmed. Throws
-     * for unknown or ambiguous names, like the switching calls do.
+     * Other room and house selections never include printers, so this is empty for them. A
+     * printer that is offline or reported itself off gets nothing sent, so needs nothing
+     * confirmed. Throws for unknown or ambiguous names, like the switching calls do.
      */
-    printersToConfirm(selector: Selector): HouseDevice[] {
-        const selection = this.select(selector);
-        if (!selection.named) {
+    printersToConfirm(selector: SwitchSelector): HouseDevice[] {
+        const selection = this.select(selector, "turn_off");
+        if (!selection.includePrinters) {
             return [];
         }
         return selection.ids
@@ -180,26 +229,35 @@ export class House {
     }
 
     /**
-     * Switch named devices, or a room's devices, on
+     * Switch named devices, or a room's or the house's devices (of a kind), on
      */
-    async turnOn(selector: Selector): Promise<SwitchResult> {
+    async turnOn(selector: SwitchSelector): Promise<SwitchResult> {
         return this.switchSelection("turn_on", selector, true, {});
     }
 
     /**
-     * Switch named devices, or a room's devices, off
+     * Switch named devices, or a room's or the house's devices (of a kind), off
      */
-    async turnOff(selector: Selector, options: TurnOffOptions = {}): Promise<SwitchResult> {
+    async turnOff(selector: SwitchSelector, options: TurnOffOptions = {}): Promise<SwitchResult> {
         return this.switchSelection("turn_off", selector, false, options);
     }
 
     /**
-     * Switch off everything that switches, except printers
+     * Switch off everything that switches, except printers and the devices in except
      */
-    async allOff(): Promise<SwitchResult> {
+    async allOff(except?: string[]): Promise<SwitchResult> {
+        const all = [...this.devices.keys()].filter(id => this.devices.get(id)!.bridge.capabilities.has("onoff"));
+        const { ids, excepted } = this.leaveOut(all, except);
+        // Printers stay in ids, to be reported as left alone, but never count as something to switch
+        if (except !== undefined && !ids.some(id => this.devices.get(id)!.config.kind !== "printer")) {
+            throw nothingToSwitch({ except });
+        }
+
         this.assertBrokerConnected();
-        const all = [...this.devices.values()].filter(device => device.bridge.capabilities.has("onoff"));
-        return this.switchDevices("all_off", all, false, { includePrinters: false });
+        return this.switchDevices("all_off", ids.map(id => this.devices.get(id)!), false, {
+            includePrinters: false,
+            excepted: excepted?.map(id => this.devices.get(id)!),
+        });
     }
 
     /**
@@ -232,6 +290,15 @@ export class House {
         this.assertBrokerConnected();
 
         const brightness = settings.brightness;
+        const requested = [
+            brightness !== undefined ? `brightness ${brightness}%` : null,
+            color !== undefined ? `color ${color}` : null,
+        ].filter(part => part !== null).join(" and ");
+
+        if (this.dryRun) {
+            return this.commandResult(device, false, `Would send ${requested} to ${device.config.id}`);
+        }
+
         const confirmed = await this.sendAndWait(
             device,
             () => device.bridge.setLight!({ brightness, color }),
@@ -239,11 +306,6 @@ export class House {
                 (brightness === undefined || (typeof state.brightness === "number" && Math.abs(state.brightness - brightness) <= 1)) &&
                 (color === undefined || state.color === color)
         );
-
-        const requested = [
-            brightness !== undefined ? `brightness ${brightness}%` : null,
-            color !== undefined ? `color ${color}` : null,
-        ].filter(part => part !== null).join(" and ");
 
         return this.commandResult(device, confirmed, confirmed
             ? `${device.config.id} confirmed ${requested}`
@@ -263,6 +325,10 @@ export class House {
 
         this.assertOnline(device);
         this.assertBrokerConnected();
+
+        if (this.dryRun) {
+            return this.commandResult(device, false, `Would send ${match} to ${device.config.id}`);
+        }
 
         const confirmed = await this.sendAndWait(
             device,
@@ -285,6 +351,10 @@ export class House {
         this.assertOnline(device);
         this.assertBrokerConnected();
 
+        if (this.dryRun) {
+            return this.commandResult(device, false, `Would send to ${device.config.id}`);
+        }
+
         try {
             await device.bridge.press!();
         } catch (error) {
@@ -295,22 +365,54 @@ export class House {
     }
 
     /**
-     * Resolve a selector to device ids, remembering whether they were named or a room
+     * Resolve a selector to device ids, remembering whether they were named, and which
+     * devices except took out. The action only tailors the refusals.
      */
-    private select(selector: Selector): { ids: string[]; named: boolean; room?: string } {
+    private select(selector: SwitchSelector, action?: "turn_on" | "turn_off"): Selection {
         const hasDevices = selector.devices !== undefined;
         const hasRoom = selector.room !== undefined;
+        const hasKind = selector.kind !== undefined;
 
-        if (hasDevices === hasRoom) {
+        if (!hasDevices && !hasRoom && !hasKind && selector.except !== undefined) {
+            throw new HouseError(
+                "Give devices, a room or a kind alongside except." +
+                (action === "turn_off" ? " To switch off everything but some devices, use all_off with except." : "")
+            );
+        }
+        if (hasDevices && hasKind) {
+            throw new HouseError("Give either devices or a kind, with or without a room, not both");
+        }
+        if (hasDevices === (hasRoom || hasKind)) {
             throw new HouseError("Give either devices or a room, not both and not neither");
         }
 
+        let selection: Selection;
         if (hasDevices) {
-            return { ids: this.names.resolveDevices(selector.devices!), named: true };
+            selection = { ids: this.names.resolveDevices(selector.devices!), named: true, includePrinters: true };
+        } else {
+            const { room, ids } = hasRoom
+                ? this.names.resolveRoom(selector.room!)
+                : { room: undefined, ids: [...this.devices.keys()] };
+            selection = {
+                ids: hasKind ? ids.filter(id => this.devices.get(id)!.config.kind === selector.kind) : ids,
+                named: false,
+                includePrinters: selector.kind === "printer",
+                room,
+            };
         }
 
-        const { room, ids } = this.names.resolveRoom(selector.room!);
-        return { ids, named: false, room };
+        return { ...selection, ...this.leaveOut(selection.ids, selector.except) };
+    }
+
+    /**
+     * Take the devices named in except out of a selection; every name must resolve
+     */
+    private leaveOut(ids: string[], except: readonly string[] | undefined): { ids: string[]; excepted?: string[] } {
+        if (except === undefined) {
+            return { ids };
+        }
+        const left = new Set(except.length > 0 ? this.names.resolveDevices(except) : []);
+        return { ids: ids.filter(id => !left.has(id)), excepted: ids.filter(id => left.has(id)) };
     }
 
     /**
@@ -339,11 +441,11 @@ export class House {
 
     private async switchSelection(
         action: "turn_on" | "turn_off",
-        selector: Selector,
+        selector: SwitchSelector,
         on: boolean,
         options: TurnOffOptions
     ): Promise<SwitchResult> {
-        const selection = this.select(selector);
+        const selection = this.select(selector, action);
         const devices = selection.ids.map(id => this.devices.get(id)!);
 
         if (selection.named) {
@@ -355,17 +457,29 @@ export class House {
             }
         }
 
+        const canSwitch = (device: HouseDevice) => device.bridge.capabilities.has("onoff");
+        const switchable = devices.filter(canSwitch);
+        // Skipped printers stay in switchable, to be reported as left alone, but don't count here.
+        // Without kind or except, a room with nothing to switch answers "Nothing to switch." as before.
+        const eligible = switchable.filter(device => selection.includePrinters || device.config.kind !== "printer");
+        if (eligible.length === 0 && (selector.kind !== undefined || selector.except !== undefined)) {
+            throw nothingToSwitch(selector, selection.room);
+        }
+
         this.assertBrokerConnected();
 
-        const switchable = devices.filter(device => device.bridge.capabilities.has("onoff"));
         const result = await this.switchDevices(action, switchable, on, {
-            includePrinters: selection.named,
+            includePrinters: selection.includePrinters,
             confirmedPrinters: options.confirmedPrinters,
             refusalReason: options.refusalReason,
+            excepted: selection.excepted?.map(id => this.devices.get(id)!).filter(canSwitch),
         });
         if (selection.room !== undefined) {
             result.room = selection.room;
             result.summary = `In the ${selection.room}: ${result.summary}`;
+        }
+        if (selector.kind !== undefined) {
+            result.kind = selector.kind;
         }
         return result;
     }
@@ -374,22 +488,29 @@ export class House {
      * Switch devices and collect what each one did
      *
      * Every device is handled in parallel, so a room takes one confirmation timeout at
-     * most, not one per device.
+     * most, not one per device. A dry run decides the same way and sends nothing.
      */
     private async switchDevices(
         action: SwitchResult["action"],
         devices: HouseDevice[],
         on: boolean,
-        options: { includePrinters: boolean; confirmedPrinters?: ReadonlySet<string>; refusalReason?: string }
+        options: {
+            includePrinters: boolean;
+            confirmedPrinters?: ReadonlySet<string>;
+            refusalReason?: string;
+            excepted?: HouseDevice[];
+        }
     ): Promise<SwitchResult> {
         const target: OnOff = on ? "on" : "off";
         const result: SwitchResult = {
             action,
+            ...(this.dryRun ? { dry_run: true as const } : {}),
             switched: [],
             already: [],
             not_confirmed: [],
             offline: [],
             printers_skipped: [],
+            ...(options.excepted ? { excepted: options.excepted.map(leftAlone) } : {}),
             refused: [],
             failed: [],
             summary: "",
@@ -401,7 +522,7 @@ export class House {
             const { state } = bridge;
 
             if (config.kind === "printer" && !options.includePrinters) {
-                result.printers_skipped.push({ id: config.id, state: onOff(state.on), online: state.online });
+                result.printers_skipped.push(leftAlone(device));
                 continue;
             }
             // Offline first: an offline device's last report is stale
@@ -418,6 +539,11 @@ export class House {
                     id: config.id,
                     reason: options.refusalReason ?? "switching off a printer needs a person's confirmation",
                 });
+                continue;
+            }
+            // A dry run stops here: what it would send is reported as switched
+            if (this.dryRun) {
+                result.switched.push({ id: config.id, state: target, source: state.source });
                 continue;
             }
             toSend.push(device);
@@ -525,6 +651,7 @@ export class House {
     private commandResult(device: HouseDevice, confirmed: boolean, summary: string): CommandResult {
         return {
             id: device.config.id,
+            ...(this.dryRun ? { dry_run: true as const } : {}),
             confirmed,
             state: stateFields(device.bridge.state),
             source: device.bridge.state.source,
@@ -582,6 +709,22 @@ function onOff(on: boolean | null): OnOff | null {
     return on === null ? null : on ? "on" : "off";
 }
 
+function leftAlone({ config, bridge }: HouseDevice): LeftAlone {
+    return { id: config.id, state: onOff(bridge.state.on), online: bridge.state.online };
+}
+
+/**
+ * The refusal for a selection that kind or except narrowed down to nothing switchable
+ */
+function nothingToSwitch(selector: SwitchSelector, room?: string): HouseError {
+    const what = selector.kind !== undefined ? `device of kind ${selector.kind}` : "device";
+    const where = selector.devices !== undefined
+        ? "among the devices given"
+        : room !== undefined ? `in the ${room}` : "in the house";
+    const rest = selector.except !== undefined && selector.except.length > 0 ? " besides the ones in except" : "";
+    return new HouseError(`No ${what} ${where}${rest} can be switched on or off. Nothing was sent.`);
+}
+
 function errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
 }
@@ -592,11 +735,13 @@ function errorMessage(error: unknown): string {
 function summarize(result: SwitchResult): string {
     const parts: string[] = [];
     const ids = (items: Array<{ id: string }>) => items.map(item => item.id).join(", ");
+    const described = (items: LeftAlone[]) =>
+        items.map(item => `${item.id} (${item.state ?? "state unknown"})`).join(", ");
 
     for (const state of ["on", "off"] as const) {
         const switched = result.switched.filter(item => item.state === state);
         if (switched.length > 0) {
-            parts.push(`switched ${state}: ${ids(switched)}`);
+            parts.push(`${result.dry_run ? "would switch" : "switched"} ${state}: ${ids(switched)}`);
         }
     }
     if (result.already.length > 0) {
@@ -614,11 +759,11 @@ function summarize(result: SwitchResult): string {
     if (result.refused.length > 0) {
         parts.push(`refused: ${result.refused.map(item => `${item.id} (${item.reason})`).join(", ")}`);
     }
+    if (result.excepted !== undefined && result.excepted.length > 0) {
+        parts.push(`left alone as asked: ${described(result.excepted)}`);
+    }
     if (result.printers_skipped.length > 0) {
-        const described = result.printers_skipped
-            .map(item => `${item.id} (${item.state ?? "state unknown"})`)
-            .join(", ");
-        parts.push(`printers left alone: ${described}`);
+        parts.push(`printers left alone: ${described(result.printers_skipped)}`);
     }
 
     return parts.length > 0 ? `${parts.join("; ")}.` : "Nothing to switch.";

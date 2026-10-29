@@ -4,6 +4,8 @@
  * Printer confirmation is the point: it must come from a person through the client's
  * elicitation, for 2026-07-28 clients (input_required) and 2025-era clients (a pushed
  * elicitation/create) alike, and nothing else may stand in for it.
+ *
+ * The dry run must publish nothing at all, while answering exactly as /mcp would.
  */
 
 import { strict as assert } from "node:assert";
@@ -29,18 +31,22 @@ interface ClientOptions {
     answer?: ElicitAnswer;
     /** Manual multi-round-trip mode, to inspect and replay input_required results */
     manual?: boolean;
+    /** Connect to /mcp/dry-run instead of /mcp */
+    dryRun?: boolean;
 }
 
 describe("MCP tools", () => {
     let harness: Harness;
     let server: McpHttpServer;
     let url: URL;
+    let dryRunUrl: URL;
     const clients: Client[] = [];
 
     beforeEach(async () => {
         harness = await startHarness();
         server = await startMcpHttpServer(new HouseMcp(harness.house), { host: "127.0.0.1", port: 0, token: TOKEN });
         url = new URL(`http://127.0.0.1:${server.port}/mcp`);
+        dryRunUrl = new URL(`http://127.0.0.1:${server.port}/mcp/dry-run`);
     });
 
     afterEach(async () => {
@@ -73,7 +79,9 @@ describe("MCP tools", () => {
             });
         }
 
-        await client.connect(new StreamableHTTPClientTransport(url, { authProvider: { token: async () => TOKEN } }));
+        await client.connect(new StreamableHTTPClientTransport(options.dryRun ? dryRunUrl : url, {
+            authProvider: { token: async () => TOKEN },
+        }));
         clients.push(client);
         return { client, prompts };
     }
@@ -233,6 +241,137 @@ describe("MCP tools", () => {
         });
     });
 
+    for (const era of ["modern", "legacy"] as const) {
+        describe(`dry run, ${era} client`, () => {
+            it("publishes nothing, asks no one, and says what it would have done", async () => {
+                const { client, prompts } = await connect({ era, answer: "accept", dryRun: true });
+
+                const { json: lights } = await call(client, "turn_off", { room: "den", kind: "light" });
+                assert.equal(lights.dry_run, true);
+                assert.deepEqual(lights.switched, [
+                    { id: "den_light", state: "off", source: "reported" },
+                    { id: "reading_lamp", state: "off", source: "reported" },
+                ]);
+                assert.equal(lights.summary, "In the den: would switch off: den_light, reading_lamp.");
+
+                const { json: all } = await call(client, "all_off", { except: ["lanterns"] });
+                assert.equal(all.dry_run, true);
+                assert.deepEqual(all.switched.map((item: { id: string }) => item.id), ["den_light", "reading_lamp", "tv"]);
+                assert.deepEqual(all.excepted, [{ id: "lanterns", state: "off", online: true }]);
+                assert.deepEqual(all.printers_skipped.map((item: { id: string }) => item.id), ["trident", "v0"]);
+
+                const { json: printers } = await call(client, "turn_off", { kind: "printer" });
+                assert.equal(prompts.length, 0);
+                assert.deepEqual(printers.refused, [
+                    { id: "trident", reason: "a person would be asked to confirm; a dry run asks no one" },
+                    { id: "v0", reason: "a person would be asked to confirm; a dry run asks no one" },
+                ]);
+                assert.deepEqual(printers.switched, []);
+
+                const { json: light } = await call(client, "set_light", { device: "nudge", brightness: 40, color: "red" });
+                assert.equal(light.dry_run, true);
+                assert.equal(light.confirmed, false);
+                assert.equal(light.summary, "Would send brightness 40% and color #ff0000 to nudge");
+
+                const { json: input } = await call(client, "set_tv_input", { input: "hdmi2" });
+                assert.equal(input.summary, "Would send HDMI2 to tv");
+                const { json: bubbles } = await call(client, "bubble");
+                assert.equal(bubbles.dry_run, true);
+
+                // Nothing at all, not even late
+                await new Promise(resolve => setTimeout(resolve, 100));
+                assert.deepEqual(harness.fake.published, []);
+                assert.equal(harness.fake.power.get("den_light"), "ON");
+                assert.equal(harness.fake.bubbles, 0);
+            });
+        });
+    }
+
+    describe("dry run", () => {
+        it("serves the same tools and reads as /mcp", async () => {
+            const { client: live } = await connect({ era: "modern" });
+            const { client: dry } = await connect({ era: "modern", dryRun: true });
+
+            assert.deepEqual((await dry.listTools()).tools, (await live.listTools()).tools);
+            assert.deepEqual((await call(dry, "list_devices")).json, (await call(live, "list_devices")).json);
+            assert.deepEqual(
+                (await call(dry, "get_state", { room: "den" })).json,
+                (await call(live, "get_state", { room: "den" })).json
+            );
+        });
+
+        it("refuses with the same errors as /mcp, word for word", async () => {
+            const { client: live } = await connect({ era: "modern" });
+            const { client: dry } = await connect({ era: "modern", dryRun: true });
+
+            const badCalls: Array<[string, Record<string, unknown>]> = [
+                ["turn_on", { devices: ["lamp"] }],
+                ["turn_off", { devices: ["kitchen light"] }],
+                ["turn_off", { room: "den", except: ["kitchen light"] }],
+                ["all_off", { except: ["kitchen light"] }],
+                ["turn_on", { devices: ["tv"], kind: "light" }],
+                ["turn_on", {}],
+                ["turn_on", { devices: ["blup"] }],
+                ["turn_off", { room: "bedroom", kind: "tv" }],
+                ["turn_off", { room: "den", except: ["den light", "reading lamp", "tv"] }],
+                ["all_off", { except: ["den light", "reading lamp", "tv", "living room light", "lanterns", "nudge", "cooler"] }],
+                ["turn_on", { except: ["lanterns"] }],
+                ["turn_off", { except: ["lanterns"] }],
+                ["turn_off", { kind: "lights" }],
+                ["set_light", { device: "den light", brightness: 50 }],
+                ["set_tv_input", { input: "HDMI9" }],
+            ];
+            for (const [name, args] of badCalls) {
+                const expected = await call(live, name, args);
+                const actual = await call(dry, name, args);
+                assert.equal(expected.isError, true, `${name} ${JSON.stringify(args)} should be refused`);
+                assert.equal(actual.isError, true);
+                assert.equal(actual.text, expected.text);
+            }
+
+            await harness.mqttClient.disconnect();
+            const expected = await call(live, "turn_on", { room: "den" });
+            const actual = await call(dry, "turn_on", { room: "den" });
+            assert.match(expected.text, /broker is unavailable/);
+            assert.equal(actual.text, expected.text);
+
+            assert.deepEqual(harness.fake.published, []);
+        });
+
+        it("returns what /mcp then does, in the same shape", async () => {
+            const { client: live } = await connect({ era: "modern" });
+            const { client: dry } = await connect({ era: "modern", dryRun: true });
+
+            // Each dry run first, then the same call live from the same state
+            for (const [name, args] of [
+                ["turn_off", { room: "den", kind: "light", except: ["reading lamp"] }],
+                ["all_off", { except: ["lanterns"] }],
+                ["turn_on", { devices: ["nudge"] }],
+            ] as Array<[string, Record<string, unknown>]>) {
+                const { dry_run, summary: drySummary, ...wouldDo } = (await call(dry, name, args)).json;
+                const { summary, ...did } = (await call(live, name, args)).json;
+
+                assert.equal(dry_run, true);
+                assert.ok(!("dry_run" in did));
+                assert.deepEqual(wouldDo, did, `${name} ${JSON.stringify(args)}`);
+                assert.equal(drySummary, summary.replace(/\bswitched (on|off)\b/g, "would switch $1"));
+            }
+
+            const dryLight = (await call(dry, "set_light", { device: "nudge", brightness: 40 })).json;
+            const liveLight = (await call(live, "set_light", { device: "nudge", brightness: 40 })).json;
+            assert.deepEqual(Object.keys(dryLight).filter(key => key !== "dry_run"), Object.keys(liveLight));
+        });
+
+        it("refuses printers as /mcp does for a client that cannot ask", async () => {
+            const { client } = await connect({ era: "modern", dryRun: true });
+            const { json } = await call(client, "turn_off", { devices: ["trident"] });
+
+            assert.equal(json.dry_run, true);
+            assert.match(json.refused[0].reason, /cannot ask a person to confirm/);
+            assert.deepEqual(harness.fake.published, []);
+        });
+    });
+
     describe("HTTP", () => {
         it("requires the bearer token", async () => {
             const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
@@ -258,9 +397,44 @@ describe("MCP tools", () => {
             assert.equal(response.status, 403);
         });
 
-        it("serves only /mcp", async () => {
+        it("serves only /mcp and its dry run", async () => {
             const response = await fetch(new URL("/other", url), { headers: { authorization: `Bearer ${TOKEN}` } });
             assert.equal(response.status, 404);
+        });
+
+        it("puts the dry run behind the same checks, with sessions of its own", async () => {
+            const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+            const ping = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
+            assert.equal((await fetch(dryRunUrl, { method: "POST", headers, body: ping })).status, 401);
+            assert.equal((await fetch(dryRunUrl, {
+                method: "POST",
+                headers: { ...headers, authorization: `Bearer ${TOKEN}`, origin: "http://evil.example" },
+                body: ping,
+            })).status, 403);
+
+            // A 2025-era session opened on the dry run must not be usable on /mcp
+            const authorized = { ...headers, authorization: `Bearer ${TOKEN}` };
+            const initialized = await fetch(dryRunUrl, {
+                method: "POST",
+                headers: authorized,
+                body: JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: 1,
+                    method: "initialize",
+                    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } },
+                }),
+            });
+            const sessionId = initialized.headers.get("mcp-session-id");
+            await initialized.text();
+            assert.ok(sessionId);
+
+            const crossed = await fetch(url, {
+                method: "POST",
+                headers: { ...authorized, "mcp-session-id": sessionId, "mcp-protocol-version": "2025-06-18" },
+                body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "all_off", arguments: {} } }),
+            });
+            assert.equal(crossed.status, 404);
+            assert.deepEqual(harness.fake.published, []);
         });
     });
 });
