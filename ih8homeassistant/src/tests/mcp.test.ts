@@ -127,13 +127,22 @@ describe("MCP tools", () => {
                 assert.deepEqual(harness.fake.commandsTo("cmnd/trident/POWER"), []);
             });
 
-            it("refuses for a client without elicitation, ignoring a confirmation passed as an argument", async () => {
+            it("refuses for a client without elicitation", async () => {
                 const { client } = await connect({ era });
-                const { json } = await call(client, "turn_off", { devices: ["trident"], confirm: true, confirmed: true });
+                const { json } = await call(client, "turn_off", { devices: ["trident"] });
 
                 assert.equal(json.refused.length, 1);
                 assert.match(json.refused[0].reason, /cannot ask a person to confirm/);
                 assert.deepEqual(harness.fake.commandsTo("cmnd/trident/POWER"), []);
+            });
+
+            it("refuses a confirmation passed as an argument, and sends nothing", async () => {
+                const { client } = await connect({ era });
+                const { isError, text } = await call(client, "turn_off", { devices: ["trident"], confirm: true, confirmed: true });
+
+                assert.equal(isError, true);
+                assert.match(text, /Unrecognized keys: "confirm", "confirmed"/);
+                assert.deepEqual(harness.fake.published, []);
             });
 
             it("asks nothing for room-wide actions, which leave printers alone", async () => {
@@ -346,6 +355,38 @@ describe("MCP tools", () => {
             assert.equal(actual.text, expected.text);
 
             assert.deepEqual(harness.fake.published, []);
+        });
+
+        it("refuses an argument a tool doesn't have, as /mcp does, and sends nothing", async () => {
+            const { client: live } = await connect({ era: "modern" });
+            const { client: dry } = await connect({ era: "modern", dryRun: true });
+
+            for (const tool of (await live.listTools()).tools) {
+                assert.equal((tool.inputSchema as Record<string, unknown>).additionalProperties, false, tool.name);
+            }
+
+            // Each call is a valid one but for the argument named last
+            const calls: Array<[string, Record<string, unknown>, string]> = [
+                ["turn_on", { devices: ["lanterns"], schedule: "19:00" }, "schedule"],
+                ["turn_off", { devices: ["lanterns"], delay: 600 }, "delay"],
+                ["get_state", { kind: "light" }, "kind"],
+                ["list_devices", { room: "den" }, "room"],
+                ["all_off", { at: "23:00" }, "at"],
+                ["set_light", { device: "nudge", brightness: 40, at: "19:00" }, "at"],
+                ["set_tv_input", { input: "HDMI2", at: "19:00" }, "at"],
+                ["bubble", { times: 3 }, "times"],
+            ];
+            for (const [name, args, key] of calls) {
+                const expected = await call(live, name, args);
+                const actual = await call(dry, name, args);
+                assert.equal(expected.isError, true, `${name} ${JSON.stringify(args)} should be refused`);
+                assert.match(expected.text, new RegExp(`Unrecognized key: "${key}"`));
+                assert.equal(actual.isError, true);
+                assert.equal(actual.text, expected.text);
+            }
+
+            assert.deepEqual(harness.fake.published, []);
+            assert.equal(harness.fake.bubbles, 0);
         });
 
         it("returns what /mcp then does, in the same shape", async () => {

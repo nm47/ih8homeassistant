@@ -65,7 +65,9 @@ const room = z.string().describe("A room name, e.g. \"den\"; every switchable de
 const kind = z.enum(DEVICE_KINDS).describe("Only devices of this kind, in the room given or else the whole house");
 const except = z.array(z.string()).describe("Device ids, names or aliases to leave alone");
 
-const selectorSchema = z.object({
+// Every tool's arguments are a strict object: an argument the tool doesn't have is refused, never dropped.
+// Dropped, a made-up time on a switch ("schedule", "at", "delay") left a call that switched at once.
+const selectorSchema = z.strictObject({
     devices: deviceList.optional(),
     room: room.optional(),
 });
@@ -125,7 +127,7 @@ export class HouseMcp {
                     "which tools work on it, whether it is online, its state, and where the state came from " +
                     "(\"reported\" by the device, or \"last sent\" for the TV, which cannot be queried). " +
                     "null means not known yet.",
-                inputSchema: z.object({}),
+                inputSchema: z.strictObject({}),
                 annotations: { readOnlyHint: true },
             },
             async () => this.json(house.listDevices())
@@ -179,7 +181,7 @@ export class HouseMcp {
                 description:
                     "Switch off everything in the house except printers. The result lists the printers left alone. " +
                     "Give except to leave some devices alone.",
-                inputSchema: z.object({ except: except.optional() }),
+                inputSchema: z.strictObject({ except: except.optional() }),
                 annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
             },
             async ({ except }) => this.guard(async () => {
@@ -194,7 +196,7 @@ export class HouseMcp {
                 description:
                     "Set a light's brightness (percent) and/or color. Color is \"#rrggbb\" or one of: " +
                     `${Object.keys(NAMED_COLORS).join(", ")}. Does not switch the light on or off.`,
-                inputSchema: z.object({
+                inputSchema: z.strictObject({
                     device: z.string().describe("Device id, name or alias, e.g. \"nudge\""),
                     brightness: z.number().int().min(0).max(100).optional().describe("Percent, 0-100"),
                     color: z.string().optional().describe("\"#rrggbb\" or a color name"),
@@ -213,7 +215,7 @@ export class HouseMcp {
                 description:
                     "Switch the TV's input, e.g. to \"HDMI2\". list_devices shows the inputs. The TV cannot be " +
                     "queried, so a confirmed result is the last command sent, not what the screen shows.",
-                inputSchema: z.object({
+                inputSchema: z.strictObject({
                     input: z.string().describe("Input name, e.g. \"HDMI1\""),
                     device: z.string().optional().describe("Only needed if there is more than one TV"),
                 }),
@@ -229,7 +231,7 @@ export class HouseMcp {
             "bubble",
             {
                 description: "Make blüp blow bubbles. It gives no confirmation, so the result only says it was sent.",
-                inputSchema: z.object({
+                inputSchema: z.strictObject({
                     device: z.string().optional().describe("Only needed if there is more than one such device"),
                 }),
                 annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
